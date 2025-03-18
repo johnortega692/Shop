@@ -1134,43 +1134,36 @@ class WallcoveringCalculatorUI(ctk.CTk):
             self.annotation_line_color_preview.configure(bg=color[1])
 
     def on_canvas_click(self, event):
-        """Handle canvas click based on current mode"""
-
+        print(f"CLICK: x={event.x}, y={event.y}, annotation_mode={self.annotation_mode}")
+        
         if self.annotation_mode:
-            # Check if clicked on an existing annotation
+            print("  Annotation mode branch activated")
             annotation = self.find_annotation_at_position(event.x, event.y)
+            print(f"  Found existing annotation: {annotation is not None}")
             
             if annotation:
-                # Start moving the annotation
+                print("  Found existing annotation, starting move")
                 self.moving_annotation = True
                 self.current_annotation = annotation
                 return
             
-            # If line drawing is enabled and we have an annotation selected
+            print(f"  Checking line drawing: {self.line_drawing_var.get()}")
+            print(f"  Current annotation: {self.current_annotation is not None}")
             if self.line_drawing_var.get() and self.current_annotation:
-                # Start drawing a line from the current annotation
+                print("  Starting line drawing")
                 self.line_drawing = True
                 self.annotation_line_start = self.current_annotation
                 return
             
-            # Create a new annotation circle at click position
+            print("  About to add annotation circle")
             self.add_annotation_circle(event.x, event.y)
+            print("  After adding annotation circle")
         elif self.selection_mode:
-            # Handle panel selection (existing code)
-            clicked_panel = self.find_panel_at_position(event.x, event.y)
-            if clicked_panel:
-                if clicked_panel.id in self.selected_panels:
-                    # Deselect the panel
-                    self.selected_panels.remove(clicked_panel.id)
-                else:
-                    # Select the panel
-                    self.selected_panels.append(clicked_panel.id)
-                
-                # Update the selected panels display
-                self.update_selected_panels_display()
-                
-                # Redraw the canvas to show selection
-                self.calculate()
+            # Your existing panel selection code
+            print("  Selection mode branch")
+            # Rest of your code
+        else:
+            print("  Neither annotation nor selection mode active")
 
 
 
@@ -1257,45 +1250,38 @@ class WallcoveringCalculatorUI(ctk.CTk):
         return None
 
     def add_annotation_circle(self, x, y):
-        """Add a new annotation circle at the specified position"""
+        print(f"ADD CIRCLE: Starting at ({x}, {y})")
         try:
-            # Get properties from UI controls
-            text = self.annotation_text_var.get()
-            radius = int(self.annotation_size_var.get())
-            font_size = int(self.annotation_font_size_var.get())
-            
-            # Create annotation circle
+            # Create a simple annotation circle with fixed values
             circle = AnnotationCircle(
                 id=self.next_annotation_id,
                 x=x,
                 y=y,
-                radius=radius,
-                text=text,
-                color=self.annotation_color_preview["background"],
-                border_color=self.annotation_border_preview["background"],
-                text_color=self.annotation_text_color_preview["background"],
+                radius=20,
+                text="1",
+                color="#FFFFFF",
+                border_color="#000000",
+                text_color="#000000",
                 border_width=2,
-                font_size=font_size,
-                line_color=self.annotation_line_color_preview["background"],
-                line_width=int(self.annotation_line_width_var.get()),
-                line_style="dash" if self.annotation_line_style_var.get() == "Dashed" else ""
+                font_size=10,
+                line_color="#000000",
+                line_width=1,
+                line_style=""
             )
             
+            print(f"  Circle created with id={circle.id}")
             self.annotation_circles.append(circle)
+            print(f"  Total circles now: {len(self.annotation_circles)}")
             self.next_annotation_id += 1
             
-            # Auto-increment the text if it's a number
-            if text.isdigit():
-                next_num = int(text) + 1
-                self.annotation_text_var.set(str(next_num))
-            
-            # Select the newly created annotation as current
-            self.current_annotation = circle
-            
-            # Update the drawing
+            # Call calculate to update display
+            print("  Calling calculate")
             self.calculate()
-        except ValueError as e:
-            messagebox.showerror("Error", f"Invalid input: {str(e)}")
+            print("  After calculate")
+        except Exception as e:
+            print(f"ADD CIRCLE ERROR: {e}")
+            import traceback
+            traceback.print_exc()
 
     def edit_annotation_text(self):
         """Edit the text of the current annotation"""
@@ -1365,22 +1351,19 @@ class WallcoveringCalculatorUI(ctk.CTk):
             self.calculate()
 
     def draw_annotations(self):
-        """Draw all annotation circles on the canvas"""
+        print(f"DRAW: {len(self.annotation_circles)} circles to draw")
+        
+        if not self.annotation_circles:
+            print("  No annotations to draw!")
+            return
+            
         for circle in self.annotation_circles:
+            print(f"  Drawing circle: id={circle.id}, pos=({circle.x}, {circle.y}), text={circle.text}")
+            
             # Draw connecting line if present
             if circle.line_to_x is not None and circle.line_to_y is not None:
-                # Determine line dash pattern if needed
-                dash = (4, 2) if circle.line_style == "dash" else None
-                
-                # Draw line
-                self.canvas.create_line(
-                    circle.x, circle.y,
-                    circle.line_to_x, circle.line_to_y,
-                    fill=circle.line_color,
-                    width=circle.line_width,
-                    dash=dash,
-                    arrow=tk.LAST  # Add arrowhead at the end of the line
-                )
+                # Your existing line drawing code
+                pass
             
             # Draw circle
             circle_id = self.canvas.create_oval(
@@ -1401,14 +1384,19 @@ class WallcoveringCalculatorUI(ctk.CTk):
                 fill=circle.text_color,
                 font=(circle.font_family, circle.font_size, "bold")
             )
+            
+            print(f"  Circle {circle.id} drawn on canvas")
 
     # Modify the draw_wall method to include drawing annotations
     def draw_wall_with_annotations(self, panels: List[Panel]):
-        # First, call the original draw_wall method
+        print("DRAW_WALL_WITH_ANNOTATIONS: Starting")
+        # First call the original method
         self.draw_wall(panels)
         
         # Then draw annotations on top
+        print(f"  Now drawing {len(self.annotation_circles)} annotations")
         self.draw_annotations()
+        print("DRAW_WALL_WITH_ANNOTATIONS: Completed")
 
     # Modify the calculate method to use the updated drawing function
     def calculate_with_annotations(self):
@@ -4401,7 +4389,12 @@ with precise measurements and customizable configurations.
         
         # Update canvas with visual cue for selection mode
         self.calculate()  # Redraw everything
+        
     def on_canvas_click(self, event):
+        print(f"CLICK: x={event.x}, y={event.y}, annotation_mode={self.annotation_mode}")
+    
+        if self.annotation_mode:
+            print("  Annotation mode branch activated")
         """Handle click on canvas to select panels"""
         if not self.selection_mode:
             return
@@ -4421,6 +4414,11 @@ with precise measurements and customizable configurations.
             
             # Redraw the canvas to show selection
             self.calculate()
+
+        # At the end, just before add_annotation_circle:
+        print("  About to add annotation circle")
+        self.add_annotation_circle(event.x, event.y)
+        
     def find_panel_at_position(self, x, y):
         """Find the panel at the given canvas coordinates"""
         # Get the current panels
@@ -5701,6 +5699,8 @@ with precise measurements and customizable configurations.
 
     def calculate(self):
         panels = self.calculate_panels()
+        print(f"CALCULATE: Drawing with {len(panels)} panels and {len(self.annotation_circles) if hasattr(self, 'annotation_circles') else 0} annotations")
+    
         self.draw_wall_with_annotations(panels)
         
         # Update summary
