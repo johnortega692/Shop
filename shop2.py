@@ -30,7 +30,9 @@ class Panel:
     actual_width_fraction: str = "0"  # Optional parameters at the end
     height_fraction: str = "0"
     border_color: str = "red"  # Default border color
-    
+    floor_mounted: bool = True  # Whether the panel is mounted on the floor
+    height_offset: Dimension = None  # Height offset from floor if not floor mounted
+    height_offset_fraction: str = "0"  # Fraction for height offset    
     
 @dataclass
 class WallObject:
@@ -125,7 +127,7 @@ class PDFExporter:
         
         # Add header
         c.setFont("Helvetica-Bold", 16)
-        c.drawString(30, width - 40, "Shop Drawings")
+        c.drawString(30, width - 40, "Wallcovering Calculator")
         
         # Add project details
         c.setFont("Helvetica", 12)
@@ -300,7 +302,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
         """Modified __init__ method to use the tabbed interface"""
         super().__init__()
 
-        self.title("Shop Drawings")
+        self.title("Wallcovering Calculator")
         self.geometry("1400x900")
 
         # Initialize calculator
@@ -338,8 +340,52 @@ class WallcoveringCalculatorUI(ctk.CTk):
         self.initialize_annotation_system()
         
         # Bind mouse events for panel selection
-        self.canvas.bind("<Button-1>", self.on_canvas_click)
-
+        # self.canvas.bind("<Button-1>", self.on_canvas_click)
+    def manual_add_circle(self, x, y):
+        """Add an annotation circle using UI settings"""
+        print(f"ADD CIRCLE: x={x}, y={y}")
+        try:
+            # Get properties from UI controls
+            text = self.annotation_text_var.get()
+            radius = int(self.annotation_size_var.get())
+            font_size = int(self.annotation_font_size_var.get())
+            
+            # Create circle with UI settings
+            circle = AnnotationCircle(
+                id=self.next_annotation_id,
+                x=x,
+                y=y,
+                radius=radius,
+                text=text,
+                color=self.annotation_color_preview["background"],
+                border_color=self.annotation_border_preview["background"],
+                text_color=self.annotation_text_color_preview["background"],
+                border_width=2,
+                font_size=font_size,
+                line_color=self.annotation_line_color_preview["background"],
+                line_width=int(self.annotation_line_width_var.get()),
+                line_style="dash" if self.annotation_line_style_var.get() == "Dashed" else ""
+            )
+            
+            # Add to list and increment ID
+            self.annotation_circles.append(circle)
+            self.next_annotation_id += 1
+            self.current_annotation = circle
+            
+            # Auto-increment the text if it's a number
+            if text.isdigit():
+                next_num = int(text) + 1
+                self.annotation_text_var.set(str(next_num))
+            
+            # Update the current annotation
+            self.current_annotation = circle
+            
+            # Redraw
+            self.calculate()
+        except Exception as e:
+            print(f"ERROR in add_annotation_circle: {e}")
+            import traceback
+            traceback.print_exc()
         
     def create_scrollable_frame(self, parent):
         """Create a scrollable frame with CustomTkinter styling"""
@@ -380,6 +426,10 @@ class WallcoveringCalculatorUI(ctk.CTk):
 
     def create_wall_panel_controls(self, parent):
         """Create wall and panel dimension controls"""
+        # Define fraction options at the beginning of the method
+        fraction_options = ["0", "1/16", "1/8", "3/16", "1/4", "5/16", "3/8", "7/16", 
+                          "1/2", "9/16", "5/8", "11/16", "3/4", "13/16", "7/8", "15/16"]
+        
         # Wall dimensions section
         wall_section = ctk.CTkFrame(parent)
         wall_section.pack(pady=10, fill=tk.X)
@@ -551,7 +601,44 @@ class WallcoveringCalculatorUI(ctk.CTk):
             width=50
         )
         center_panel_entry.pack(side=tk.LEFT, padx=5)
-        
+
+        # Floor mounted toggle
+        self.floor_mounted_var = tk.BooleanVar(value=True)
+        floor_mounted_cb = ctk.CTkCheckBox(
+            options_section,
+            text="Mount Panels on Floor",
+            variable=self.floor_mounted_var,
+            command=self.on_floor_mounted_change
+        )
+        floor_mounted_cb.pack(pady=5, anchor="w")
+
+        # Height offset frame - initially hidden
+        self.height_offset_frame = ctk.CTkFrame(options_section)
+        # Don't pack yet - will be shown/hidden based on checkbox state
+
+        ctk.CTkLabel(self.height_offset_frame, text="Height from Floor:").pack(side=tk.LEFT, padx=5)
+        self.height_offset_feet_var = tk.StringVar(value="0")
+        height_offset_feet_entry = ctk.CTkEntry(self.height_offset_frame, textvariable=self.height_offset_feet_var, width=50)
+        height_offset_feet_entry.pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(self.height_offset_frame, text="feet").pack(side=tk.LEFT)
+
+        self.height_offset_inches_var = tk.StringVar(value="0")
+        height_offset_inches_entry = ctk.CTkEntry(self.height_offset_frame, textvariable=self.height_offset_inches_var, width=50)
+        height_offset_inches_entry.pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(self.height_offset_frame, text="inches").pack(side=tk.LEFT)
+
+        # Add fraction dropdown for height offset
+        ctk.CTkLabel(self.height_offset_frame, text="+").pack(side=tk.LEFT, padx=2)
+        self.height_offset_fraction_var = tk.StringVar(value="0")
+        height_offset_fraction_dropdown = ctk.CTkOptionMenu(
+            self.height_offset_frame,
+            variable=self.height_offset_fraction_var,
+            values=fraction_options,
+            width=70
+        )
+        height_offset_fraction_dropdown.pack(side=tk.LEFT, padx=5)
+
+                
         # Baseboard frame - initially hidden
         self.baseboard_frame = ctk.CTkFrame(options_section)
         # Don't pack yet - will be shown/hidden based on checkbox state
@@ -565,8 +652,6 @@ class WallcoveringCalculatorUI(ctk.CTk):
         
         # Add fraction dropdown for baseboard
         ctk.CTkLabel(self.baseboard_frame, text="+").pack(side=tk.LEFT, padx=2)
-        fraction_options = ["0", "1/16", "1/8", "3/16", "1/4", "5/16", "3/8", "7/16", 
-                          "1/2", "9/16", "5/8", "11/16", "3/4", "13/16", "7/8", "15/16"]
         self.baseboard_fraction_var = tk.StringVar(value="0")
         baseboard_fraction_dropdown = ctk.CTkOptionMenu(
             self.baseboard_frame,
@@ -927,10 +1012,12 @@ class WallcoveringCalculatorUI(ctk.CTk):
         self.line_drawing = False
         self.annotation_line_start = None
         
-        # In initialize_annotation_system or somewhere in init
+        # Bind mouse events for annotation interactions
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_click)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
+        
+        # Add right-click context menu for annotations
         self.canvas.bind("<ButtonPress-3>", self.on_annotation_right_click)
 
     def create_annotation_controls(self, parent):
@@ -951,12 +1038,13 @@ class WallcoveringCalculatorUI(ctk.CTk):
         )
         annotation_mode_cb.pack(pady=5, anchor="w")
         
-        # Line drawing mode toggle
+        # In create_annotation_controls method:
         self.line_drawing_var = tk.BooleanVar(value=False)
         line_drawing_cb = ctk.CTkCheckBox(
             annotation_section,
             text="Connect Circle with Line",
-            variable=self.line_drawing_var
+            variable=self.line_drawing_var,
+            command=lambda: print(f"Line drawing set to: {self.line_drawing_var.get()}")  # Debug callback
         )
         line_drawing_cb.pack(pady=5, anchor="w")
         
@@ -1093,9 +1181,17 @@ class WallcoveringCalculatorUI(ctk.CTk):
         help_label = ctk.CTkLabel(parent, text=help_text, wraplength=400)
         help_label.pack(pady=10)
 
+        test_btn = ctk.CTkButton(
+            parent,
+            text="Manual Add Circle",
+            command=lambda: self.manual_add_circle(200, 200)
+        )
+        test_btn.pack(pady=10)
+
     def toggle_annotation_mode(self):
         """Toggle annotation mode on/off"""
         self.annotation_mode = self.annotation_mode_var.get()
+        print(f"Annotation mode set to: {self.annotation_mode}")
         
         # If enabling annotation mode, disable panel selection mode
         if self.annotation_mode and hasattr(self, 'selection_mode_var'):
@@ -1108,6 +1204,16 @@ class WallcoveringCalculatorUI(ctk.CTk):
         
         # Update the UI to reflect the mode change
         self.calculate()
+
+    # Add this new debug method
+    def debug_line_drawing_state(self):
+        """Print the current state of line drawing variables"""
+        print(f"Line drawing enabled: {self.line_drawing_var.get()}")
+        print(f"Current annotation: {self.current_annotation is not None}")
+        print(f"Line drawing active: {self.line_drawing}")
+        print(f"Line start annotation: {self.annotation_line_start}")
+        if self.current_annotation:
+            print(f"Current annotation id: {self.current_annotation.id}, pos: ({self.current_annotation.x}, {self.current_annotation.y})")
 
     def choose_annotation_color(self):
         """Choose color for annotation fill"""
@@ -1126,6 +1232,37 @@ class WallcoveringCalculatorUI(ctk.CTk):
         color = colorchooser.askcolor(color=self.annotation_text_color_preview["background"], title="Choose Annotation Text Color")
         if color[1]:
             self.annotation_text_color_preview.configure(bg=color[1])
+    def on_floor_mounted_change(self):
+        """Handle floor mounted checkbox change"""
+        if self.floor_mounted_var.get():
+            # Panels are floor mounted, hide height offset controls
+            if hasattr(self, 'height_offset_frame'):
+                self.height_offset_frame.pack_forget()
+        else:
+            # Panels are not floor mounted, show height offset controls
+            if hasattr(self, 'height_offset_frame'):
+                # Check if baseboard frame exists and is packed
+                # Instead of trying to pack relative to baseboard_frame, just pack it
+                # directly in the options_section
+                for widget in self.tab_wall.winfo_children():
+                    if isinstance(widget, ctk.CTkFrame):
+                        for child in widget.winfo_children():
+                            if child == self.height_offset_frame:
+                                # Already packed
+                                return
+                
+                # Find the options_section frame
+                for widget in self.wall_frame.winfo_children():
+                    if isinstance(widget, ctk.CTkFrame) and len(widget.winfo_children()) > 0:
+                        if isinstance(widget.winfo_children()[0], ctk.CTkLabel) and \
+                           "Panel Options" in widget.winfo_children()[0].cget("text"):
+                            # This is the options section
+                            self.height_offset_frame.pack(in_=widget, pady=5, fill=tk.X, before=self.baseboard_frame if self.use_baseboard else None)
+                            break
+                
+        # Recalculate and redraw
+        self.calculate()
+
 
     def choose_annotation_line_color(self):
         """Choose color for annotation line"""
@@ -1179,6 +1316,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
                 # Update the drawing
                 self.calculate()
             elif self.line_drawing and self.annotation_line_start:
+                print(f"Updating line endpoint to ({event.x}, {event.y})")
                 # Update the line endpoint
                 self.annotation_line_start.line_to_x = event.x
                 self.annotation_line_start.line_to_y = event.y
@@ -1194,14 +1332,16 @@ class WallcoveringCalculatorUI(ctk.CTk):
                 self.moving_annotation = False
                 
             if self.line_drawing:
+                print(f"Finalizing line at ({event.x}, {event.y})")
                 # Check if we released over another annotation
                 target = self.find_annotation_at_position(event.x, event.y)
                 
                 if target and target != self.annotation_line_start:
+                    print(f"Connected to annotation {target.id}")
                     # Connect to this annotation instead of arbitrary point
                     self.annotation_line_start.line_to_x = target.x
                     self.annotation_line_start.line_to_y = target.y
-                elif not target:
+                else:
                     # Keep the current line endpoint
                     self.annotation_line_start.line_to_x = event.x
                     self.annotation_line_start.line_to_y = event.y
@@ -1351,19 +1491,27 @@ class WallcoveringCalculatorUI(ctk.CTk):
             self.calculate()
 
     def draw_annotations(self):
+        """Draw all annotation circles on the canvas"""
         print(f"DRAW: {len(self.annotation_circles)} circles to draw")
         
-        if not self.annotation_circles:
-            print("  No annotations to draw!")
-            return
-            
         for circle in self.annotation_circles:
-            print(f"  Drawing circle: id={circle.id}, pos=({circle.x}, {circle.y}), text={circle.text}")
+            print(f"  Drawing circle: id={circle.id}, pos=({circle.x}, {circle.y})")
             
             # Draw connecting line if present
             if circle.line_to_x is not None and circle.line_to_y is not None:
-                # Your existing line drawing code
-                pass
+                print(f"  Drawing line from ({circle.x}, {circle.y}) to ({circle.line_to_x}, {circle.line_to_y})")
+                # Determine line dash pattern if needed
+                dash = (4, 2) if circle.line_style == "dash" else None
+                
+                # Draw line
+                self.canvas.create_line(
+                    circle.x, circle.y,
+                    circle.line_to_x, circle.line_to_y,
+                    fill=circle.line_color,
+                    width=circle.line_width,
+                    dash=dash,
+                    arrow=tk.LAST  # Add arrowhead at the end of the line
+                )
             
             # Draw circle
             circle_id = self.canvas.create_oval(
@@ -2304,7 +2452,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
         # App title
         app_title = ctk.CTkLabel(
             about_section, 
-            text="Shop Drawings", 
+            text="Wallcovering Calculator", 
             font=("Arial", 20, "bold")
         )
         app_title.pack(pady=(20, 5))
@@ -4075,7 +4223,12 @@ with precise measurements and customizable configurations.
         self.use_baseboard = self.baseboard_var.get()
         self.baseboard_height = self.safe_int_conversion(self.baseboard_height_var.get(), 4)
         self.baseboard_fraction = self.baseboard_fraction_var.get() if hasattr(self, 'baseboard_fraction_var') else "0"
+        floor_mounted = self.floor_mounted_var.get()
+        height_offset_feet = self.safe_int_conversion(self.height_offset_feet_var.get(), 0)
+        height_offset_inches = self.safe_int_conversion(self.height_offset_inches_var.get(), 0)
+        height_offset_fraction = self.height_offset_fraction_var.get()
 
+        height_offset_dim = Dimension(height_offset_feet, height_offset_inches)
         # Calculate wall dimensions in inches with fractions
         wall_width_inches_total = self.convert_to_inches(
             wall_width_feet,
@@ -4391,33 +4544,48 @@ with precise measurements and customizable configurations.
         self.calculate()  # Redraw everything
         
     def on_canvas_click(self, event):
-        print(f"CLICK: x={event.x}, y={event.y}, annotation_mode={self.annotation_mode}")
-    
+        """Handle canvas click based on current mode"""
         if self.annotation_mode:
-            print("  Annotation mode branch activated")
-        """Handle click on canvas to select panels"""
-        if not self.selection_mode:
-            return
-        
-        # Find which panel was clicked
-        clicked_panel = self.find_panel_at_position(event.x, event.y)
-        if clicked_panel:
-            if clicked_panel.id in self.selected_panels:
-                # Deselect the panel
-                self.selected_panels.remove(clicked_panel.id)
-            else:
-                # Select the panel
-                self.selected_panels.append(clicked_panel.id)
+            print(f"Click in annotation mode: ({event.x}, {event.y})")
+            self.debug_line_drawing_state()
             
-            # Update the selected panels display
-            self.update_selected_panels_display()
+            # Check if clicked on an existing annotation
+            annotation = self.find_annotation_at_position(event.x, event.y)
             
-            # Redraw the canvas to show selection
-            self.calculate()
-
-        # At the end, just before add_annotation_circle:
-        print("  About to add annotation circle")
-        self.add_annotation_circle(event.x, event.y)
+            if annotation:
+                print(f"Found annotation {annotation.id}")
+                # Start moving the annotation
+                self.moving_annotation = True
+                self.current_annotation = annotation
+                return
+            
+            # If line drawing is enabled and we have an annotation selected
+            if self.line_drawing_var.get() and self.current_annotation:
+                print(f"Starting line from annotation {self.current_annotation.id}")
+                # Start drawing a line from the current annotation
+                self.line_drawing = True
+                self.annotation_line_start = self.current_annotation
+                return
+            
+            # Create a new annotation circle at click position
+            print("Adding new annotation")
+            self.manual_add_circle(event.x, event.y)
+        elif self.selection_mode:
+            # Handle panel selection (existing code)
+            clicked_panel = self.find_panel_at_position(event.x, event.y)
+            if clicked_panel:
+                if clicked_panel.id in self.selected_panels:
+                    # Deselect the panel
+                    self.selected_panels.remove(clicked_panel.id)
+                else:
+                    # Select the panel
+                    self.selected_panels.append(clicked_panel.id)
+                
+                # Update the selected panels display
+                self.update_selected_panels_display()
+                
+                # Redraw the canvas to show selection
+                self.calculate()
         
     def find_panel_at_position(self, x, y):
         """Find the panel at the given canvas coordinates"""
@@ -5492,6 +5660,7 @@ with precise measurements and customizable configurations.
         
         for panel in sorted_panels:
             # Create a corrected panel that doesn't overlap
+            # Include floor_mounted and height_offset properties
             fixed_panel = Panel(
                 id=panel.id,
                 x=current_x_percent,
@@ -5501,7 +5670,10 @@ with precise measurements and customizable configurations.
                 height=panel.height,
                 height_fraction=panel.height_fraction,
                 color=panel.color,
-                border_color=panel.border_color 
+                border_color=panel.border_color,
+                floor_mounted=panel.floor_mounted if hasattr(panel, 'floor_mounted') else True,
+                height_offset=panel.height_offset if hasattr(panel, 'height_offset') else None,
+                height_offset_fraction=panel.height_offset_fraction if hasattr(panel, 'height_offset_fraction') else "0"
             )
             fixed_panels.append(fixed_panel)
             current_x_percent += panel.width  # Update for next panel
@@ -5519,11 +5691,37 @@ with precise measurements and customizable configurations.
             )
             visual_panel_height = min(panel_height_inches, visual_usable_height) * scale
             
-            # Calculate panel y position from bottom
-            if self.use_baseboard:
-                panel_bottom = y_offset + scaled_height - baseboard_height
+            # Calculate panel y position based on floor mounting
+            floor_mounted = True
+            if hasattr(panel, 'floor_mounted'):
+                floor_mounted = panel.floor_mounted
+                
+            if floor_mounted:
+                # Floor mounted panels start from bottom (minus baseboard if used)
+                if self.use_baseboard:
+                    panel_bottom = y_offset + scaled_height - baseboard_height
+                else:
+                    panel_bottom = y_offset + scaled_height
             else:
-                panel_bottom = y_offset + scaled_height
+                # Calculate height offset in inches
+                height_offset_inches = 0
+                if hasattr(panel, 'height_offset') and panel.height_offset:
+                    height_offset_inches = self.convert_to_inches(
+                        panel.height_offset.feet,
+                        panel.height_offset.inches,
+                        panel.height_offset_fraction
+                    )
+                
+                # For non-floor mounted panels, position from bottom with offset
+                height_offset_scaled = height_offset_inches * scale
+                
+                # Calculate bottom position considering offset from floor
+                panel_bottom = y_offset + scaled_height - height_offset_scaled
+                
+                # If there's a baseboard, make sure the panel is above it
+                if self.use_baseboard:
+                    min_bottom = y_offset + scaled_height - baseboard_height
+                    panel_bottom = min(panel_bottom, min_bottom)
                 
             panel_top = panel_bottom - visual_panel_height
             
@@ -5534,7 +5732,7 @@ with precise measurements and customizable configurations.
                 panel_x + panel_width,
                 panel_bottom,
                 fill=panel.color,
-                outline=self.panel_border_color,  # Use the border color property
+                outline=panel.border_color,
                 width=1
             )
 
@@ -5564,11 +5762,37 @@ with precise measurements and customizable configurations.
             )
             visual_panel_height = min(panel_height_inches, visual_usable_height) * scale
             
-            # Calculate panel y position from bottom
-            if self.use_baseboard:
-                panel_bottom = y_offset + scaled_height - baseboard_height
+            # Calculate panel y position based on floor mounting
+            floor_mounted = True
+            if hasattr(panel, 'floor_mounted'):
+                floor_mounted = panel.floor_mounted
+                
+            if floor_mounted:
+                # Floor mounted panels start from bottom (minus baseboard if used)
+                if self.use_baseboard:
+                    panel_bottom = y_offset + scaled_height - baseboard_height
+                else:
+                    panel_bottom = y_offset + scaled_height
             else:
-                panel_bottom = y_offset + scaled_height
+                # Calculate height offset in inches
+                height_offset_inches = 0
+                if hasattr(panel, 'height_offset') and panel.height_offset:
+                    height_offset_inches = self.convert_to_inches(
+                        panel.height_offset.feet,
+                        panel.height_offset.inches,
+                        panel.height_offset_fraction
+                    )
+                
+                # For non-floor mounted panels, position from bottom with offset
+                height_offset_scaled = height_offset_inches * scale
+                
+                # Calculate bottom position considering offset from floor
+                panel_bottom = y_offset + scaled_height - height_offset_scaled
+                
+                # If there's a baseboard, make sure the panel is above it
+                if self.use_baseboard:
+                    min_bottom = y_offset + scaled_height - baseboard_height
+                    panel_bottom = min(panel_bottom, min_bottom)
                 
             panel_top = panel_bottom - visual_panel_height
 
@@ -5610,10 +5834,37 @@ with precise measurements and customizable configurations.
                         )
                         visual_panel_height = min(panel_height_inches, visual_usable_height) * scale
                         
-                        if self.use_baseboard:
-                            panel_bottom = y_offset + scaled_height - baseboard_height
+                        # Calculate panel y position based on floor mounting
+                        floor_mounted = True
+                        if hasattr(panel, 'floor_mounted'):
+                            floor_mounted = panel.floor_mounted
+                            
+                        if floor_mounted:
+                            # Floor mounted panels start from bottom (minus baseboard if used)
+                            if self.use_baseboard:
+                                panel_bottom = y_offset + scaled_height - baseboard_height
+                            else:
+                                panel_bottom = y_offset + scaled_height
                         else:
-                            panel_bottom = y_offset + scaled_height
+                            # Calculate height offset in inches
+                            height_offset_inches = 0
+                            if hasattr(panel, 'height_offset') and panel.height_offset:
+                                height_offset_inches = self.convert_to_inches(
+                                    panel.height_offset.feet,
+                                    panel.height_offset.inches,
+                                    panel.height_offset_fraction
+                                )
+                            
+                            # For non-floor mounted panels, position from bottom with offset
+                            height_offset_scaled = height_offset_inches * scale
+                            
+                            # Calculate bottom position considering offset from floor
+                            panel_bottom = y_offset + scaled_height - height_offset_scaled
+                            
+                            # If there's a baseboard, make sure the panel is above it
+                            if self.use_baseboard:
+                                min_bottom = y_offset + scaled_height - baseboard_height
+                                panel_bottom = min(panel_bottom, min_bottom)
                             
                         panel_top = panel_bottom - visual_panel_height
                         
@@ -5658,13 +5909,58 @@ with precise measurements and customizable configurations.
 
             # Draw panel height dimension on right side
             if fixed_panels:
+                # For the first panel, show its height dimension
+                panel = fixed_panels[0]
+                
+                # Calculate panel y position based on floor mounting
+                floor_mounted = True
+                if hasattr(panel, 'floor_mounted'):
+                    floor_mounted = panel.floor_mounted
+                    
+                if floor_mounted:
+                    # Floor mounted panels start from bottom (minus baseboard if used)
+                    if self.use_baseboard:
+                        panel_bottom = y_offset + scaled_height - baseboard_height
+                    else:
+                        panel_bottom = y_offset + scaled_height
+                else:
+                    # Calculate height offset in inches
+                    height_offset_inches = 0
+                    if hasattr(panel, 'height_offset') and panel.height_offset:
+                        height_offset_inches = self.convert_to_inches(
+                            panel.height_offset.feet,
+                            panel.height_offset.inches,
+                            panel.height_offset_fraction
+                        )
+                    
+                    # For non-floor mounted panels, position from bottom with offset
+                    height_offset_scaled = height_offset_inches * scale
+                    
+                    # Calculate bottom position considering offset from floor
+                    panel_bottom = y_offset + scaled_height - height_offset_scaled
+                    
+                    # If there's a baseboard, make sure the panel is above it
+                    if self.use_baseboard:
+                        min_bottom = y_offset + scaled_height - baseboard_height
+                        panel_bottom = min(panel_bottom, min_bottom)
+                    
+                # Calculate panel height for visualization
+                panel_height_inches = self.convert_to_inches(
+                    panel.height.feet, 
+                    panel.height.inches, 
+                    panel.height_fraction
+                )
+                visual_panel_height = min(panel_height_inches, visual_usable_height) * scale
+                panel_top = panel_bottom - visual_panel_height
+                
+                # Draw height dimension
                 self.draw_dimension_line(
                     x_offset + scaled_width + 40, 
                     panel_bottom,
                     x_offset + scaled_width + 40, 
                     panel_top,
-                    fixed_panels[0].height,
-                    fixed_panels[0].height_fraction,
+                    panel.height,
+                    panel.height_fraction,
                     offset=30,
                     side="right"
                 )
@@ -5696,6 +5992,38 @@ with precise measurements and customizable configurations.
                     offset=15,
                     side="right"
                 )
+                
+            # Draw height offset dimension for panels not mounted on floor
+            for panel in fixed_panels:
+                if hasattr(panel, 'floor_mounted') and not panel.floor_mounted and hasattr(panel, 'height_offset') and panel.height_offset:
+                    panel_x = x_offset + (panel.x / 100 * scaled_width)
+                    panel_width = (panel.width / 100 * scaled_width)
+                    
+                    # Calculate height offset in inches
+                    height_offset_inches = self.convert_to_inches(
+                        panel.height_offset.feet,
+                        panel.height_offset.inches,
+                        panel.height_offset_fraction
+                    )
+                    height_offset_scaled = height_offset_inches * scale
+                    
+                    # Calculate bottom position considering offset from floor
+                    panel_bottom = y_offset + scaled_height - height_offset_scaled
+                    
+                    # If there's a baseboard, the visible floor line may be different
+                    floor_line = y_offset + scaled_height
+                    
+                    # Draw dimension line for height offset from floor
+                    self.draw_dimension_line(
+                        panel_x - 20,
+                        panel_bottom,
+                        panel_x - 20,
+                        floor_line,
+                        panel.height_offset,
+                        panel.height_offset_fraction,
+                        offset=15,
+                        side="left"
+                    )
 
     def calculate(self):
         panels = self.calculate_panels()
