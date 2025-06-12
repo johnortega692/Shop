@@ -1,18 +1,33 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from tkinter import colorchooser
-from dataclasses import dataclass
-from typing import List, Tuple
-import customtkinter as ctk
+# Standard library imports
+import os
 import math
+import copy
 from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+
+# Tkinter imports
+import tkinter as tk
+from tkinter import messagebox, filedialog, colorchooser
+
+# CustomTkinter for modern UI
+import customtkinter as ctk
+
+# Data structure helpers
+from dataclasses import dataclass, field
+
+# PDF and export functionality
 from reportlab.pdfgen import canvas as reportlab_canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
-from PIL import ImageGrab
-import os
+
+# Image processing (for export functions)
+from PIL import Image
 import cairosvg
 
+# Only import these when needed in specific functions:
+# import pyscreenshot
+# import tempfile
+# import webbrowser
 
 @dataclass
 class Dimension:
@@ -81,6 +96,41 @@ class AnnotationCircle:
     canvas_id: int = None  # To store the canvas circle ID for updates/moves
 
 
+@dataclass
+class Wall:
+    id: int
+    name: str
+    dimensions: dict
+    panels: List[Panel] = field(default_factory=list)
+    baseboard_enabled: bool = False
+    baseboard_height: float = 4
+    baseboard_fraction: str = "0"
+    panel_color: str = "#FFFFFF"
+    panel_border_color: str = "red"
+    wall_objects: List[WallObject] = field(default_factory=list)
+    custom_panel_widths: dict = field(default_factory=dict)
+    split_panels: dict = field(default_factory=dict)
+    selected_panels: List[int] = field(default_factory=list)
+    annotation_circles: List[AnnotationCircle] = field(default_factory=list)
+    next_object_id: int = 1
+    next_annotation_id: int = 1
+    
+    # Panel configuration
+    panel_dimensions: dict = field(default_factory=dict)  # Empty dict instead of preset values
+    use_equal_panels: bool = False
+    panel_count: int = 2
+    use_center_panels: bool = False
+    center_panel_count: int = 4
+    floor_mounted: bool = True
+    height_offset: Optional[Dimension] = None
+    height_offset_fraction: str = "0"
+    
+    # Display settings
+    show_dimensions: bool = True
+    show_object_distances: bool = False
+    show_horizontal_distances: bool = False
+    distance_reference: str = "Wall Top"
+    custom_name: str = "Panel"
 
 class PDFExporter:
     def __init__(self, canvas_widget, summary_text):
@@ -299,7 +349,9 @@ class PDFExporter:
     
 class WallcoveringCalculatorUI(ctk.CTk):
     def __init__(self):
-        """Modified __init__ method to use the tabbed interface"""
+        # Add calculation control flags
+        self.calculation_in_progress = False
+        self.pending_calculation = False
         super().__init__()
 
         self.title("Wallcovering Calculator")
@@ -315,7 +367,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
         self.panel_color = "#FFFFFF"
         self.baseboard_var = tk.BooleanVar(value=False)
         self.panel_border_color = "red"  # Default panel border color
-        
+        # self.setup_variable_traces()
         # Initialize object-related variables
         self.selected_panels = []  # List of selected panel IDs
         self.wall_objects = []     # List of WallObject instances
@@ -330,17 +382,22 @@ class WallcoveringCalculatorUI(ctk.CTk):
         self.current_annotation = None
         self.line_drawing = False
         self.annotation_line_start = None
-        
-        # Initialize split panels tracking
-        self.split_panels = {}
-        
-        # Use:
+        self.summary_refresh_requested = False
+        # Initialize panel customization tracking
+        self.custom_panel_widths = {}  # Make sure to initialize this
+        self.split_panels = {}         # And this
+        self.current_active_wall_id = None
+        self.switching_walls = False
+
+        # Create the UI
         self.create_tabbed_interface_with_annotations()
-        # Initialize the system
-        self.initialize_annotation_system()
         
-        # Bind mouse events for panel selection
-        # self.canvas.bind("<Button-1>", self.on_canvas_click)
+        # Create walls tab interface
+        self.create_walls_tab_interface()
+        
+        # Initialize the annotation system
+        self.initialize_annotation_system()
+
     def manual_add_circle(self, x, y):
         """Add an annotation circle using UI settings"""
         print(f"ADD CIRCLE: x={x}, y={y}")
@@ -506,6 +563,17 @@ class WallcoveringCalculatorUI(ctk.CTk):
         # Left column of checkboxes
         left_check_frame = ctk.CTkFrame(checkbox_frame)
         left_check_frame.pack(side=tk.LEFT, fill=tk.Y, expand=True)
+
+                # Floor mounted toggle
+        self.floor_mounted_var = tk.BooleanVar(value=True)
+        floor_mounted_cb = ctk.CTkCheckBox(
+            left_check_frame,
+            text="Mount Panels on Floor",
+            variable=self.floor_mounted_var,
+            command=self.on_floor_mounted_change
+        )
+        floor_mounted_cb.pack(pady=5, anchor="w")
+
         
         self.show_dimensions_var = tk.BooleanVar(value=True)
         show_dimensions_cb = ctk.CTkCheckBox(
@@ -533,7 +601,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
             command=self.on_center_panels_change
         )
         center_panels_cb.pack(pady=5, anchor="w")
-        
+
         # Right column of checkboxes
         right_check_frame = ctk.CTkFrame(checkbox_frame)
         right_check_frame.pack(side=tk.LEFT, fill=tk.Y, expand=True)
@@ -574,7 +642,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
         self.show_horizontal_distances_var = tk.BooleanVar(value=False)
         show_horizontal_distances_cb = ctk.CTkCheckBox(
             right_check_frame,
-            text="Show Horizontal Object Distances",
+            text="Horizontal Object Distances",
             variable=self.show_horizontal_distances_var,
             command=self.calculate
         )
@@ -602,15 +670,42 @@ class WallcoveringCalculatorUI(ctk.CTk):
         )
         center_panel_entry.pack(side=tk.LEFT, padx=5)
 
-        # Floor mounted toggle
-        self.floor_mounted_var = tk.BooleanVar(value=True)
-        floor_mounted_cb = ctk.CTkCheckBox(
-            options_section,
-            text="Mount Panels on Floor",
-            variable=self.floor_mounted_var,
-            command=self.on_floor_mounted_change
+        # Start seam position section
+        self.start_seam_frame = ctk.CTkFrame(options_section)
+        # Don't pack yet - will be shown/hidden based on checkbox state
+
+        ctk.CTkLabel(self.start_seam_frame, text="Start Seam At:").pack(side=tk.LEFT, padx=5)
+
+        self.start_seam_feet_var = tk.StringVar(value="0")
+        start_seam_feet_entry = ctk.CTkEntry(self.start_seam_frame, textvariable=self.start_seam_feet_var, width=50)
+        start_seam_feet_entry.pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(self.start_seam_frame, text="feet").pack(side=tk.LEFT)
+
+        self.start_seam_inches_var = tk.StringVar(value="0")
+        start_seam_inches_entry = ctk.CTkEntry(self.start_seam_frame, textvariable=self.start_seam_inches_var, width=50)
+        start_seam_inches_entry.pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(self.start_seam_frame, text="inches").pack(side=tk.LEFT)
+
+        # Add fraction dropdown for start seam
+        ctk.CTkLabel(self.start_seam_frame, text="+").pack(side=tk.LEFT, padx=2)
+        self.start_seam_fraction_var = tk.StringVar(value="0")
+        start_seam_fraction_dropdown = ctk.CTkOptionMenu(
+            self.start_seam_frame,
+            variable=self.start_seam_fraction_var,
+            values=fraction_options,
+            width=70
         )
-        floor_mounted_cb.pack(pady=5, anchor="w")
+        start_seam_fraction_dropdown.pack(side=tk.LEFT, padx=5)
+
+        # Add checkbox for start seam mode (add this with the other checkboxes)
+        self.use_start_seam_var = tk.BooleanVar(value=False)
+        start_seam_cb = ctk.CTkCheckBox(
+            right_check_frame,  # Add to the right column with other checkboxes
+            text="Start Seam at Position",
+            variable=self.use_start_seam_var,
+            command=self.on_start_seam_change
+        )
+        start_seam_cb.pack(pady=5, anchor="w")
 
         # Height offset frame - initially hidden
         self.height_offset_frame = ctk.CTkFrame(options_section)
@@ -1302,7 +1397,203 @@ class WallcoveringCalculatorUI(ctk.CTk):
         else:
             print("  Neither annotation nor selection mode active")
 
+    def on_start_seam_change(self):
+        """Handle start seam checkbox change"""
+        if self.use_start_seam_var.get():
+            self.start_seam_frame.pack(pady=5, fill=tk.X)
+            # Turn off other panel modes
+            self.equal_panels_var.set(False)
+            self.center_panels_var.set(False)
+            if hasattr(self, 'panel_count_frame'):
+                self.panel_count_frame.pack_forget()
+            if hasattr(self, 'center_panel_inputs'):
+                self.center_panel_inputs.pack_forget()
+        else:
+            self.start_seam_frame.pack_forget()
+        self.calculate()
 
+    def calculate_start_seam_panels(self, wall_width_inches_total, panel_height_dim, panel_height_frac, 
+                                   floor_mounted, height_offset_dim, height_offset_fraction):
+        """Calculate panels with a start seam at specified position"""
+        
+        # Get start seam position in inches
+        start_seam_feet = self.safe_int_conversion(self.start_seam_feet_var.get(), 0)
+        start_seam_inches = self.safe_int_conversion(self.start_seam_inches_var.get(), 0) 
+        start_seam_fraction = self.start_seam_fraction_var.get()
+        
+        start_seam_position_inches = self.convert_to_inches(
+            start_seam_feet, start_seam_inches, start_seam_fraction
+        )
+        
+        # Validate start seam position
+        if start_seam_position_inches <= 0 or start_seam_position_inches >= wall_width_inches_total:
+            # If invalid position, fall back to equal panels
+            return self.calculate_equal_panels_fallback(wall_width_inches_total, panel_height_dim, 
+                                                       panel_height_frac, floor_mounted, height_offset_dim, 
+                                                       height_offset_fraction)
+        
+        # Calculate left and right sections
+        left_width = start_seam_position_inches
+        right_width = wall_width_inches_total - start_seam_position_inches
+        
+        # Get standard panel width
+        panel_width_inches = self.convert_to_inches(
+            self.panel_dimensions["width"].feet,
+            self.panel_dimensions["width"].inches,
+            self.panel_dimensions.get("width_fraction", "0")
+        )
+        
+        if panel_width_inches <= 0:
+            panel_width_inches = 48  # Default 4 feet
+        
+        panels = []
+        current_x_inches = 0
+        panel_id = 1
+        
+        # Calculate left side panels
+        if left_width > 0:
+            # How many full panels fit in the left section?
+            left_full_panels = int(left_width // panel_width_inches)
+            left_remainder = left_width % panel_width_inches
+            
+            if left_full_panels == 0:
+                # Just one panel for the entire left section
+                left_panel_width = left_width
+                left_dim, left_frac = self.convert_to_feet_inches_fraction(left_panel_width)
+                
+                panels.append(Panel(
+                    id=panel_id,
+                    x=(current_x_inches / wall_width_inches_total * 100),
+                    width=(left_panel_width / wall_width_inches_total * 100),
+                    actual_width=left_dim,
+                    actual_width_fraction=left_frac,
+                    height=panel_height_dim,
+                    height_fraction=panel_height_frac,
+                    color=self.panel_color,
+                    border_color=self.panel_border_color,
+                    floor_mounted=floor_mounted,
+                    height_offset=height_offset_dim if not floor_mounted else None,
+                    height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                ))
+                panel_id += 1
+                current_x_inches += left_panel_width
+                
+            else:
+                # Multiple panels on left side
+                if left_remainder > 0:
+                    # Distribute the remainder equally among all left panels
+                    adjusted_left_width = left_width / (left_full_panels + 1)
+                    left_panel_count = left_full_panels + 1
+                else:
+                    # Perfect fit
+                    adjusted_left_width = panel_width_inches
+                    left_panel_count = left_full_panels
+                
+                # Create left panels
+                for i in range(left_panel_count):
+                    left_dim, left_frac = self.convert_to_feet_inches_fraction(adjusted_left_width)
+                    
+                    panels.append(Panel(
+                        id=panel_id,
+                        x=(current_x_inches / wall_width_inches_total * 100),
+                        width=(adjusted_left_width / wall_width_inches_total * 100),
+                        actual_width=left_dim,
+                        actual_width_fraction=left_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+                    panel_id += 1
+                    current_x_inches += adjusted_left_width
+        
+        # Calculate right side panels (similar logic)
+        if right_width > 0:
+            right_full_panels = int(right_width // panel_width_inches)
+            right_remainder = right_width % panel_width_inches
+            
+            if right_full_panels == 0:
+                # Just one panel for the entire right section
+                right_panel_width = right_width
+                right_dim, right_frac = self.convert_to_feet_inches_fraction(right_panel_width)
+                
+                panels.append(Panel(
+                    id=panel_id,
+                    x=(current_x_inches / wall_width_inches_total * 100),
+                    width=(right_panel_width / wall_width_inches_total * 100),
+                    actual_width=right_dim,
+                    actual_width_fraction=right_frac,
+                    height=panel_height_dim,
+                    height_fraction=panel_height_frac,
+                    color=self.panel_color,
+                    border_color=self.panel_border_color,
+                    floor_mounted=floor_mounted,
+                    height_offset=height_offset_dim if not floor_mounted else None,
+                    height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                ))
+                
+            else:
+                # Multiple panels on right side
+                if right_remainder > 0:
+                    # Distribute the remainder equally among all right panels
+                    adjusted_right_width = right_width / (right_full_panels + 1)
+                    right_panel_count = right_full_panels + 1
+                else:
+                    # Perfect fit
+                    adjusted_right_width = panel_width_inches
+                    right_panel_count = right_full_panels
+                
+                # Create right panels
+                for i in range(right_panel_count):
+                    right_dim, right_frac = self.convert_to_feet_inches_fraction(adjusted_right_width)
+                    
+                    panels.append(Panel(
+                        id=panel_id,
+                        x=(current_x_inches / wall_width_inches_total * 100),
+                        width=(adjusted_right_width / wall_width_inches_total * 100),
+                        actual_width=right_dim,
+                        actual_width_fraction=right_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+                    panel_id += 1
+                    current_x_inches += adjusted_right_width
+        
+        return panels
+
+    def calculate_equal_panels_fallback(self, wall_width_inches_total, panel_height_dim, panel_height_frac,
+                                       floor_mounted, height_offset_dim, height_offset_fraction):
+        """Fallback to equal panels if start seam calculation fails"""
+        # Simple 2-panel fallback
+        panel_width = wall_width_inches_total / 2
+        panel_dim, panel_frac = self.convert_to_feet_inches_fraction(panel_width)
+        
+        panels = []
+        for i in range(2):
+            panels.append(Panel(
+                id=i+1,
+                x=(i * 50),  # 0% and 50%
+                width=50,    # 50% each
+                actual_width=panel_dim,
+                actual_width_fraction=panel_frac,
+                height=panel_height_dim,
+                height_fraction=panel_height_frac,
+                color=self.panel_color,
+                border_color=self.panel_border_color,
+                floor_mounted=floor_mounted,
+                height_offset=height_offset_dim if not floor_mounted else None,
+                height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+            ))
+        
+        return panels
 
 
     def on_canvas_drag(self, event):
@@ -1614,45 +1905,99 @@ class WallcoveringCalculatorUI(ctk.CTk):
         # Add tabs for different sections
         self.tab_wall = self.tab_view.add("Wall & Panels")
         self.tab_objects = self.tab_view.add("Objects")
-        self.tab_annotations = self.tab_view.add("Annotations")  # Add new Annotations tab
+        self.tab_annotations = self.tab_view.add("Annotations")
         self.tab_export = self.tab_view.add("Export")
         self.tab_advanced = self.tab_view.add("Advanced")
+        self.tab_summary = self.tab_view.add("Summary")
         self.tab_about = self.tab_view.add("About")
         
         # Create scrollable frames for each tab
         self.wall_frame = self.create_scrollable_frame(self.tab_wall)
         self.objects_frame = self.create_scrollable_frame(self.tab_objects)
-        self.annotations_frame = self.create_scrollable_frame(self.tab_annotations)  # Add scrollable frame for annotations
+        self.annotations_frame = self.create_scrollable_frame(self.tab_annotations)
+        self.summary_frame = self.create_scrollable_frame(self.tab_summary)  # Create frame for summary tab
         self.export_frame = self.create_scrollable_frame(self.tab_export)
         self.advanced_frame = self.create_scrollable_frame(self.tab_advanced)
         self.about_frame = self.create_scrollable_frame(self.tab_about)
         
         # Create canvas in right frame
         self.canvas_frame = ctk.CTkFrame(right_frame)
-        self.canvas_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.canvas_frame.pack(fill=tk.BOTH, expand=True)
         
         self.canvas = tk.Canvas(self.canvas_frame, bg='white')
         self.canvas.pack(fill=tk.BOTH, expand=True)
         
-        # Add summary text at the bottom of right frame
-        self.summary_frame = ctk.CTkFrame(right_frame)
-        self.summary_frame.pack(fill=tk.X)
-        
-        self.summary_text = ctk.CTkTextbox(self.summary_frame, height=100)
-        self.summary_text.pack(fill=tk.BOTH, expand=True)
+        # Create summary text in the Summary tab instead of at the bottom of right frame
+        self.summary_text = ctk.CTkTextbox(self.summary_frame, height=600)  # Increased height for better viewing
+        self.summary_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Populate the tabs with their respective controls
         self.create_wall_panel_controls(self.wall_frame)
         self.create_object_controls(self.objects_frame)
-        self.create_annotation_controls(self.annotations_frame)  # Add annotation controls
+        self.create_annotation_controls(self.annotations_frame)
         self.create_export_controls(self.export_frame)
         self.create_advanced_controls(self.advanced_frame)
+        self.create_summary_controls(self.summary_frame) 
         self.create_about_controls(self.about_frame)
         
         # Initialize annotation system
         self.initialize_annotation_system()
 
+    def create_summary_controls(self, parent):
+        """Create controls for the Summary tab"""
+        # Create a frame for actions/settings related to summary
+        control_frame = ctk.CTkFrame(parent)
+        control_frame.pack(fill=tk.X, padx=10, pady=(0, 10), before=self.summary_text)
+        
+        # Add refresh button
+        refresh_btn = ctk.CTkButton(
+            control_frame,
+            text="Refresh Summary",
+            command=self.calculate,
+            fg_color="#1E88E5",
+            hover_color="#1565C0"
+        )
+        refresh_btn.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Add copy to clipboard button
+        copy_btn = ctk.CTkButton(
+            control_frame,
+            text="Copy to Clipboard",
+            command=self.copy_summary_to_clipboard,
+            fg_color="#757575",
+            hover_color="#616161"
+        )
+        copy_btn.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Add heading above the summary text
+        heading_label = ctk.CTkLabel(
+            parent,
+            text="Panel Summary",
+            font=("Arial", 16, "bold")
+        )
+        heading_label.pack(before=self.summary_text, pady=(0, 5))
 
+    # Add the copy summary to clipboard method
+    def copy_summary_to_clipboard(self):
+        """Copy the summary text to clipboard"""
+        # This method is called when the Copy to Clipboard button is clicked
+        self.clipboard_clear()
+        self.clipboard_append(self.summary_text.get("1.0", tk.END))
+        
+        # Show a small temporary label indication that copying was successful
+        success_label = ctk.CTkLabel(
+            self.summary_frame,
+            text="Copied to clipboard!",
+            fg_color="#4CAF50",
+            text_color="white",
+            corner_radius=8,
+            padx=10,
+            pady=5
+        )
+        success_label.pack(pady=10)
+        
+        # Auto-hide the success message after 2 seconds
+        self.after(2000, success_label.destroy)
 
     # Fix the toggle_horizontal_position_mode function to properly show/hide UI elements
     def toggle_horizontal_position_mode(self):
@@ -1714,7 +2059,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
         
         ctk.CTkLabel(format_frame, text="Format:").pack(side=tk.LEFT, padx=5)
         
-        self.export_format_var = tk.StringVar(value="TIFF (Ultra-HD Print Quality)")
+        self.export_format_var = tk.StringVar(value="EPS (Vector Format)")
         export_options = [
             "TIFF (Ultra-HD Print Quality)", 
             "PNG (Ultra-HD Quality)", 
@@ -1723,7 +2068,7 @@ class WallcoveringCalculatorUI(ctk.CTk):
             "PDF (Document Format)", 
             "EPS (Vector Format)"
         ]
-        
+
         format_dropdown = ctk.CTkOptionMenu(
             format_frame,
             variable=self.export_format_var,
@@ -1760,7 +2105,1249 @@ class WallcoveringCalculatorUI(ctk.CTk):
         )
         export_btn.pack(pady=15, fill=tk.X)
 
+        export_horizontal_btn = ctk.CTkButton(
+            export_section,
+            text="Export All Walls (Horizontal Layout)",
+            command=self.export_all_walls_horizontal,
+            fg_color="#1E88E5",
+            hover_color="#1565C0",
+            height=40
+        )
+        export_horizontal_btn.pack(pady=10, fill=tk.X)
+    def create_walls_tab_interface(self):
+        """Create a tab interface for multiple walls"""
+        # Create a frame for wall tabs at the top of the canvas area
+        # In the create_walls_tab_interface method
+        self.walls_tab_frame = ctk.CTkFrame(self.canvas_frame, height=100)  # Set your desired height here
+        self.walls_tab_frame.pack(fill=tk.X, side=tk.TOP)
+        self.walls_tab_frame.pack_propagate(False)  #         # Add wall tabs view - set a minimum width to ensure tabs are visible
+        self.walls_tabview = ctk.CTkTabview(self.walls_tab_frame, width=400)  # Wider tabview
+        self.walls_tabview.pack(fill=tk.X)
+        
+        # Initialize tracking variables
+        self.walls = []
+        self.current_wall_id = 1
+        self.current_active_wall_id = None
+        self.switching_walls = False
+        
+        # Add initial wall
+        initial_wall = self.add_wall("Wall 1")
+        self.current_active_wall_id = initial_wall.id
+        
+        # Add a "+" tab for adding new walls
+        self.add_wall_tab = self.walls_tabview.add("+")
+        add_wall_button = ctk.CTkButton(
+            self.add_wall_tab, 
+            text="Add New Wall", 
+            command=self.add_new_wall
+        )
+        add_wall_button.pack(pady=10)
+        
+        # Configure tab change event
+        self.walls_tabview.configure(command=self.on_wall_tab_change)
+        
+        # Force selection of the first wall tab
+        self.walls_tabview.set("Wall 1")
+        
+        # Make all tabs visible
 
+        self.walls_tabview._segmented_button.configure(dynamic_resizing=True)
+        
+        # Make sure data is properly initialized
+        self.update_wall_status()
+
+
+
+    def add_wall(self, name="New Wall", width_feet=8, width_inches=0, height_feet=10, height_inches=0):
+        # Create with custom dimensions
+        wall = Wall(
+            id=self.current_wall_id,
+            name=name,
+            dimensions={
+                "width": Dimension(width_feet, width_inches),
+                "width_fraction": "0",
+                "height": Dimension(height_feet, height_inches),
+                "height_fraction": "0"
+            }
+        )
+        
+        # Add to walls list
+        self.walls.append(wall)
+        
+        # Create tab for this wall
+        tab = self.walls_tabview.add(name)
+        tab.wall_id = self.current_wall_id  # Store ID in tab for reference
+        
+        # Add wall control buttons
+        controls_frame = ctk.CTkFrame(tab)
+        controls_frame.pack(fill=tk.X, pady=5)
+        
+        # Rename button
+        rename_btn = ctk.CTkButton(
+            controls_frame,
+            text="Rename Wall",
+            command=lambda id=self.current_wall_id: self.rename_wall(id)
+        )
+        rename_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Delete button
+        delete_btn = ctk.CTkButton(
+            controls_frame,
+            text="Delete Wall",
+            fg_color="#E53935",
+            hover_color="#C62828",
+            command=lambda id=self.current_wall_id: self.delete_wall(id)
+        )
+        delete_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Duplicate button
+        duplicate_btn = ctk.CTkButton(
+            controls_frame,
+            text="Duplicate Wall",
+            command=lambda id=self.current_wall_id: self.duplicate_wall(id)
+        )
+        duplicate_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Store the new wall's ID before incrementing
+        new_wall_id = self.current_wall_id
+        
+        # Increment ID counter
+        self.current_wall_id += 1
+        
+        # Select this tab
+        self.walls_tabview.set(name)
+        
+        return wall
+
+
+    def add_new_wall(self):
+        """Add a new wall when the + tab is clicked"""
+        # Create a unique name for the new wall
+        new_wall_name = f"Wall {len(self.walls) + 1}"
+        
+        # Create the new wall with default dimensions and proper initialization
+        new_wall = Wall(
+            id=self.current_wall_id,
+            name=new_wall_name,
+            dimensions={
+                "width": Dimension(8, 0),
+                "width_fraction": "0",
+                "height": Dimension(10, 0),
+                "height_fraction": "0"
+            },
+            panel_dimensions={
+                "width": Dimension(4, 0),
+                "width_fraction": "0",
+                "height": Dimension(10, 0),
+                "height_fraction": "0"
+            }
+        )
+        
+        # Add to walls list
+        self.walls.append(new_wall)
+        
+        # Create tab for this wall
+        tab = self.walls_tabview.add(new_wall_name)
+        tab.wall_id = self.current_wall_id  # Store ID in tab for reference
+        
+        # Add wall control buttons
+        controls_frame = ctk.CTkFrame(tab)
+        controls_frame.pack(fill=tk.X, pady=5)
+        
+        # Rename button
+        rename_btn = ctk.CTkButton(
+            controls_frame,
+            text="Rename Wall",
+            command=lambda id=self.current_wall_id: self.rename_wall(id)
+        )
+        rename_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Delete button
+        delete_btn = ctk.CTkButton(
+            controls_frame,
+            text="Delete Wall",
+            fg_color="#E53935",
+            hover_color="#C62828",
+            command=lambda id=self.current_wall_id: self.delete_wall(id)
+        )
+        delete_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Duplicate button
+        duplicate_btn = ctk.CTkButton(
+            controls_frame,
+            text="Duplicate Wall",
+            command=lambda id=self.current_wall_id: self.duplicate_wall(id)
+        )
+        duplicate_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Store the new wall's ID before incrementing
+        new_wall_id = self.current_wall_id
+        
+        # Increment ID counter
+        self.current_wall_id += 1
+        
+        # CRITICAL: Update the current_active_wall_id to the new wall's ID
+        self.current_active_wall_id = new_wall_id
+        
+        # Explicitly update UI with the new wall's dimensions
+        self.wall_width_feet_var.set(str(new_wall.dimensions["width"].feet))
+        self.wall_width_inches_var.set(str(new_wall.dimensions["width"].inches))
+        self.wall_width_fraction_var.set(new_wall.dimensions.get("width_fraction", "0"))
+        
+        self.wall_height_feet_var.set(str(new_wall.dimensions["height"].feet))
+        self.wall_height_inches_var.set(str(new_wall.dimensions["height"].inches))
+        self.wall_height_fraction_var.set(new_wall.dimensions.get("height_fraction", "0"))
+        
+        # Also update panel dimensions
+        if hasattr(new_wall, 'panel_dimensions'):
+            pd = new_wall.panel_dimensions
+            self.panel_width_feet_var.set(str(pd["width"].feet))
+            self.panel_width_inches_var.set(str(pd["width"].inches))
+            self.panel_width_fraction_var.set(pd.get("width_fraction", "0"))
+            
+            self.panel_height_feet_var.set(str(pd["height"].feet))
+            self.panel_height_inches_var.set(str(pd["height"].inches))
+            self.panel_height_fraction_var.set(pd.get("height_fraction", "0"))
+        
+        # CRITICAL: Initialize other properties to defaults for the new wall
+        self.use_equal_panels = False
+        self.equal_panels_var.set(False)
+        self.panel_count = 2
+        self.panel_count_var.set("2")
+        self.use_center_panels = False
+        self.center_panels_var.set(False)
+        self.center_panel_count = 4
+        self.center_panel_count_var.set("4")
+        self.use_baseboard = False
+        self.baseboard_var.set(False)
+        self.baseboard_height = 4
+        self.baseboard_height_var.set("4")
+        self.panel_color = "#FFFFFF"
+        self.panel_border_color = "red"
+        
+        # Reset custom panel widths and objects for the new wall
+        self.custom_panel_widths = {}
+        self.split_panels = {}
+        self.wall_objects = []
+        self.selected_panels = []
+        self.annotation_circles = []
+        self.next_object_id = 1
+        self.next_annotation_id = 1
+        
+        # Update UI visuals
+        if hasattr(self, 'color_preview'):
+            self.color_preview.configure(bg=self.panel_color)
+        if hasattr(self, 'border_color_preview'):
+            self.border_color_preview.configure(bg=self.panel_border_color)
+        
+        # Set the new tab as active
+        self.walls_tabview.set(new_wall_name)
+        
+        # Update wall status
+        self.update_wall_status()
+        
+        # Force a redraw
+        self.switching_walls = False
+        self.calculate()
+        
+        print(f"Created new wall: {new_wall_name} (ID: {new_wall_id})")
+        
+        return new_wall
+
+
+    def rename_wall(self, wall_id):
+        """Rename the specified wall"""
+        # Find the wall
+        wall = next((w for w in self.walls if w.id == wall_id), None)
+        if not wall:
+            return
+        
+        # Get new name from user
+        dialog = ctk.CTkInputDialog(
+            text="Enter new wall name:",
+            title="Rename Wall"
+        )
+        new_name = dialog.get_input()
+        
+        if new_name and new_name.strip():
+            old_name = wall.name
+            wall.name = new_name.strip()
+            
+            # Find the current tab name
+            old_tab_name = None
+            for tab_name in self.walls_tabview._tab_dict:
+                if tab_name != "+" and hasattr(self.walls_tabview._tab_dict[tab_name], 'wall_id'):
+                    if self.walls_tabview._tab_dict[tab_name].wall_id == wall_id:
+                        old_tab_name = tab_name
+                        break
+            
+            if old_tab_name:
+                # Add new tab with updated name
+                new_tab = self.walls_tabview.add(new_name)
+                new_tab.wall_id = wall_id
+                
+                # Instead of moving widgets, recreate them in the new tab
+                controls_frame = ctk.CTkFrame(new_tab)
+                controls_frame.pack(fill=tk.X, pady=5)
+                
+                # Recreate buttons in the new tab
+                rename_btn = ctk.CTkButton(
+                    controls_frame,
+                    text="Rename Wall",
+                    command=lambda id=wall_id: self.rename_wall(id)
+                )
+                rename_btn.pack(side=tk.LEFT, padx=5)
+                
+                delete_btn = ctk.CTkButton(
+                    controls_frame,
+                    text="Delete Wall",
+                    fg_color="#E53935",
+                    hover_color="#C62828",
+                    command=lambda id=wall_id: self.delete_wall(id)
+                )
+                delete_btn.pack(side=tk.LEFT, padx=5)
+                
+                duplicate_btn = ctk.CTkButton(
+                    controls_frame,
+                    text="Duplicate Wall",
+                    command=lambda id=wall_id: self.duplicate_wall(id)
+                )
+                duplicate_btn.pack(side=tk.LEFT, padx=5)
+                
+                # Select new tab
+                self.walls_tabview.set(new_name)
+                
+                # Remove old tab
+                self.walls_tabview.delete(old_tab_name)
+
+    def delete_wall(self, wall_id):
+        """Delete the specified wall"""
+        # Confirm deletion
+        if len(self.walls) <= 1:
+            messagebox.showerror("Error", "Cannot delete the only wall. Create a new wall first.")
+            return
+            
+        if not messagebox.askyesno("Confirm Deletion", "Are you sure you want to delete this wall?"):
+            return
+        
+        # Find the wall
+        wall_index = None
+        for i, wall in enumerate(self.walls):
+            if wall.id == wall_id:
+                wall_index = i
+                break
+        
+        if wall_index is None:
+            return
+        
+        # Find the tab name
+        tab_to_delete = None
+        for tab_name in self.walls_tabview._tab_dict:
+            if tab_name != "+" and hasattr(self.walls_tabview._tab_dict[tab_name], 'wall_id'):
+                if self.walls_tabview._tab_dict[tab_name].wall_id == wall_id:
+                    tab_to_delete = tab_name
+                    break
+        
+        # Delete the wall
+        del self.walls[wall_index]
+        
+        # Delete the tab
+        if tab_to_delete:
+            self.walls_tabview.delete(tab_to_delete)
+        
+        # Select another tab
+        if self.walls:
+            next_tab = next(tab for tab in self.walls_tabview._tab_dict if tab != "+")
+            self.walls_tabview.set(next_tab)
+            
+            # Load that wall's data
+            self.load_current_wall_data()
+
+    def duplicate_wall(self, wall_id):
+        """Create a duplicate of the specified wall"""
+        # Find the wall
+        source_wall = next((w for w in self.walls if w.id == wall_id), None)
+        if not source_wall:
+            return
+        
+        # Create new name
+        new_name = f"{source_wall.name} Copy"
+        
+        # Create new wall as a deep copy of the source
+        import copy
+        new_wall = copy.deepcopy(source_wall)
+        new_wall.id = self.current_wall_id
+        new_wall.name = new_name
+        
+        # Add to walls list
+        self.walls.append(new_wall)
+        
+        # Create tab for this wall
+        tab = self.walls_tabview.add(new_name)
+        tab.wall_id = self.current_wall_id  # Store ID in tab for reference
+        
+        # Add wall control buttons
+        controls_frame = ctk.CTkFrame(tab)
+        controls_frame.pack(fill=tk.X, pady=5)
+        
+        # Rename button
+        rename_btn = ctk.CTkButton(
+            controls_frame,
+            text="Rename Wall",
+            command=lambda id=self.current_wall_id: self.rename_wall(id)
+        )
+        rename_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Delete button
+        delete_btn = ctk.CTkButton(
+            controls_frame,
+            text="Delete Wall",
+            fg_color="#E53935",
+            hover_color="#C62828",
+            command=lambda id=self.current_wall_id: self.delete_wall(id)
+        )
+        delete_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Duplicate button
+        duplicate_btn = ctk.CTkButton(
+            controls_frame,
+            text="Duplicate Wall",
+            command=lambda id=self.current_wall_id: self.duplicate_wall(id)
+        )
+        duplicate_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Increment ID counter
+        self.current_wall_id += 1
+        
+        # Select this tab
+        self.walls_tabview.set(new_name)
+        
+        # Update UI to show this wall
+        
+        self.load_current_wall_data()
+
+        
+    def export_all_walls_horizontal(self):
+        """Export all walls to a single page with walls arranged horizontally with balanced padding
+        and only showing wall dimensions, baseboard height, and number of panels."""
+        # Validate project details
+        if not self.project_name_var.get().strip():
+            messagebox.showerror("Error", "Please enter a project name")
+            return
+
+        # Only EPS format since that works best
+        format_type = "eps"
+        extension = ".eps"
+        
+        # Get save location for the file
+        file_name = f"{self.project_name_var.get().replace(' ', '-')}-AllWalls-{self.date_var.get()}{extension}"
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=extension,
+            initialfile=file_name,
+            filetypes=[("EPS files", "*.eps")]
+        )
+        
+        if not save_path:
+            return
+        
+        try:
+            # Remember the current active wall ID and state to restore it later
+            original_wall_id = self.current_active_wall_id
+            
+            # Store original baseboard state
+            original_baseboard_enabled = self.baseboard_var.get()
+            original_use_baseboard = self.use_baseboard
+            
+            # CRITICAL FIX: Make a deep copy of all walls with their current state
+            # We'll modify these for processing but keep the originals intact
+            import copy
+            working_walls = copy.deepcopy(self.walls)
+            
+            # Show progress dialog
+            progress_window = ctk.CTkToplevel(self)
+            progress_window.title("Exporting Walls")
+            progress_window.geometry("400x150")
+            progress_window.transient(self)
+            progress_window.grab_set()
+            
+            progress_label = ctk.CTkLabel(progress_window, text=f"Creating horizontal layout of all walls...")
+            progress_label.pack(pady=10)
+            
+            progress_bar = ctk.CTkProgressBar(progress_window)
+            progress_bar.pack(pady=10, padx=20, fill=tk.X)
+            progress_bar.set(0)
+            
+            status_label = ctk.CTkLabel(progress_window, text="Preparing layout...")
+            status_label.pack(pady=10)
+            
+            # Update progress window
+            self.update()
+            
+            # First determine the total layout size needed
+            import tempfile
+            import os
+            import re
+            import time
+            
+            # Create a temporary directory to store individual wall renderings
+            temp_dir = tempfile.mkdtemp()
+            wall_renders = []
+            
+            # Process all walls - CRITICAL: Make sure we're including ALL walls
+            processed_wall_count = 0
+            
+            # CRITICAL: First, check each wall's current state and make sure it's recorded
+            # This ensures we use the wall's CURRENT state rather than the saved state
+            for i, wall in enumerate(working_walls):
+                print(f"Checking wall {i+1}: {wall.name} (ID: {wall.id})")
+                
+                # Find the tab for this wall to check its current state
+                tab_name = None
+                for tab in self.walls_tabview._tab_dict:
+                    if tab != "+" and hasattr(self.walls_tabview._tab_dict[tab], 'wall_id'):
+                        if self.walls_tabview._tab_dict[tab].wall_id == wall.id:
+                            tab_name = tab
+                            break
+                
+                if tab_name:
+                    # Temporarily switch to this wall just to check its current state
+                    old_switching = self.switching_walls
+                    self.switching_walls = True
+                    self.walls_tabview.set(tab_name)
+                    self.update()
+                    
+                    # Check if this is the currently displayed wall
+                    is_current_wall = (self.current_active_wall_id == wall.id)
+                    
+                    if is_current_wall:
+                        # If this is the currently displayed wall, get its state from the UI
+                        # because the UI represents the latest user changes
+                        current_baseboard_state = self.baseboard_var.get()
+                        print(f"  Current wall - using UI state: baseboard_enabled={current_baseboard_state}")
+                        wall.baseboard_enabled = current_baseboard_state
+                    else:
+                        # For other walls, we rely on the saved state in the wall object
+                        print(f"  Non-current wall - using saved state: baseboard_enabled={wall.baseboard_enabled}")
+                    
+                    # Go back to switching mode
+                    self.switching_walls = old_switching
+            
+            # CRITICAL: Now process each wall
+            for i, wall in enumerate(working_walls):
+                progress = (i) / (len(working_walls) * 2)  # First half of progress is layout prep
+                progress_bar.set(progress)
+                status_label.configure(text=f"Processing wall {i+1}/{len(working_walls)}: {wall.name}")
+                self.update()
+                
+                # Debug print to track wall processing
+                print(f"Processing wall {i+1}: {wall.name} (ID: {wall.id})")
+                print(f"  Wall baseboard_enabled: {wall.baseboard_enabled}")
+                
+                # Find the tab for this wall
+                tab_name = None
+                for tab in self.walls_tabview._tab_dict:
+                    if tab != "+" and hasattr(self.walls_tabview._tab_dict[tab], 'wall_id'):
+                        if self.walls_tabview._tab_dict[tab].wall_id == wall.id:
+                            tab_name = tab
+                            break
+                            
+                if not tab_name:
+                    print(f"Could not find tab for wall {wall.name}, skipping")
+                    continue
+                    
+                # Switch to this wall to render it
+                old_switching = self.switching_walls
+                self.switching_walls = True
+                
+                # Switch to this wall's tab and load its data
+                self.walls_tabview.set(tab_name)
+                self.current_active_wall_id = wall.id
+                self.load_current_wall_data()
+                
+                # CRITICAL OVERRIDE: Force the baseboard state to match our working copy
+                # This ensures we use the most up-to-date state for each wall
+                self.baseboard_var.set(wall.baseboard_enabled)
+                self.use_baseboard = wall.baseboard_enabled
+                
+                # Update UI to match the forced state
+                if wall.baseboard_enabled:
+                    if hasattr(self, 'baseboard_frame') and self.baseboard_frame.winfo_exists():
+                        self.baseboard_frame.pack(pady=5, fill=tk.X)
+                else:
+                    if hasattr(self, 'baseboard_frame') and self.baseboard_frame.winfo_exists():
+                        self.baseboard_frame.pack_forget()
+                
+                # Force UI update to reflect the changes
+                self.update()
+                print(f"  After override: self.baseboard_var={self.baseboard_var.get()}, self.use_baseboard={self.use_baseboard}")
+                
+                # Now calculate layout
+                self.switching_walls = False
+                self.calculate()
+                
+                # Allow time for rendering to complete
+                self.update()
+                time.sleep(0.5)  # Short delay to ensure rendering is complete
+                
+                # Debug verify the state just before capture
+                print(f"  Before capture: self.baseboard_var={self.baseboard_var.get()}, self.use_baseboard={self.use_baseboard}")
+                
+                # Create temporary EPS file for this wall
+                temp_eps_path = os.path.join(temp_dir, f"wall_{i+1}.eps")
+                
+                # DIRECT CAPTURE: Use the direct canvas postscript method for EPS export
+                ps_data = self.canvas.postscript(
+                    colormode='color',
+                    pagewidth=self.canvas.winfo_width(),
+                    pageheight=self.canvas.winfo_height(),
+                    x=0, y=0,
+                    width=self.canvas.winfo_width(),
+                    height=self.canvas.winfo_height()
+                )
+                
+                # Write to the temporary EPS file
+                with open(temp_eps_path, 'w') as f:
+                    f.write(ps_data)
+                
+                # Get canvas dimensions
+                canvas_width = self.canvas.winfo_width()
+                canvas_height = self.canvas.winfo_height()
+                
+                # Extract summary information for this wall
+                wall_summary = {}
+                wall_summary['name'] = wall.name
+                
+                # Wall dimensions - formatted as width x height
+                wall_width_dim = self.format_dimension(wall.dimensions["width"], wall.dimensions.get("width_fraction", "0"))
+                wall_height_dim = self.format_dimension(wall.dimensions["height"], wall.dimensions.get("height_fraction", "0"))
+                wall_summary['dimensions'] = f"{wall_width_dim} x {wall_height_dim}"
+                
+                # Baseboard height if enabled
+                if wall.baseboard_enabled:
+                    baseboard_height_inches = wall.baseboard_height
+                    if hasattr(wall, 'baseboard_fraction'):
+                        baseboard_fraction = wall.baseboard_fraction
+                        baseboard_height_inches += self.fraction_to_decimal(baseboard_fraction)
+                    baseboard_dim, baseboard_frac = self.convert_to_feet_inches_fraction(baseboard_height_inches)
+                    wall_summary['baseboard'] = self.format_dimension(baseboard_dim, baseboard_frac)
+                else:
+                    wall_summary['baseboard'] = "None"
+                
+                # Number of panels
+                wall_summary['panel_count'] = len(wall.panels)
+                
+                # Store info about this wall render with the working state
+                wall_renders.append({
+                    'name': wall.name,
+                    'width': canvas_width,
+                    'height': canvas_height,
+                    'eps_file': temp_eps_path,
+                    'has_baseboard': wall.baseboard_enabled,
+                    'summary': wall_summary  # Add the summary info to the wall render data
+                })
+                
+                processed_wall_count += 1
+                print(f"Successfully processed wall {wall.name} - Total: {processed_wall_count}")
+                
+                # Reset flag
+                self.switching_walls = old_switching
+            
+            # Check if we processed all walls
+            if processed_wall_count != len(working_walls):
+                print(f"WARNING: Only processed {processed_wall_count} out of {len(working_walls)} walls")
+            
+            # Now determine optimal layout with improved spacing
+            wall_padding = 150
+            top_margin = 150  # Increased top margin to make room for summary info
+            side_margin = 120
+            bottom_margin = 100
+            
+            # Determine max height and total width with padding
+            max_height = max([wall['height'] for wall in wall_renders]) if wall_renders else 0
+            
+            # Calculate total width WITH padding between walls
+            total_width = sum([wall['width'] for wall in wall_renders])
+            
+            # Add padding between walls (number of walls minus 1)
+            if len(wall_renders) > 1:
+                total_width += (len(wall_renders) - 1) * wall_padding
+            
+            # Calculate layout dimensions with enhanced margins
+            layout_width = total_width + (side_margin * 2)
+            layout_height = max_height + top_margin + bottom_margin
+            
+            # Create a single EPS combining all individual EPS files
+            progress_bar.set(0.9)
+            status_label.configure(text="Creating final EPS file...")
+            self.update()
+            
+            # Create a new PostScript file with required headers
+            combined_eps_path = os.path.join(temp_dir, "combined_walls.eps")
+            
+            with open(combined_eps_path, 'w') as eps_file:
+                # Write EPS header
+                eps_file.write(f"%!PS-Adobe-3.0 EPSF-3.0\n")
+                eps_file.write(f"%%BoundingBox: 0 0 {int(layout_width)} {int(layout_height)}\n")
+                eps_file.write(f"%%Pages: 1\n")
+                eps_file.write(f"%%EndComments\n\n")
+                
+                # Add project header text - moved to the left corner with more spacing
+                eps_file.write("/Helvetica-Bold findfont 14 scalefont setfont\n")
+                eps_file.write(f"{side_margin / 2} {layout_height - 20} moveto\n")
+                eps_file.write(f"(Project: {self.project_name_var.get()}) show\n\n")
+                
+                eps_file.write("/Helvetica findfont 12 scalefont setfont\n")
+                eps_file.write(f"{side_margin / 2} {layout_height - 40} moveto\n")
+                eps_file.write(f"(Date: {self.date_var.get()}) show\n\n")
+                
+                # Place each wall's EPS content
+                current_x = side_margin
+                for i, wall_info in enumerate(wall_renders):
+                    # Get the EPS file path
+                    wall_eps_path = wall_info['eps_file']
+                    
+                    # Get summary info
+                    summary = wall_info['summary']
+                    
+                    # Add wall name at the top center of each wall, far enough above the wall
+                    eps_file.write("/Helvetica-Bold findfont 14 scalefont setfont\n")
+                    name_x = current_x + (wall_info['width'] / 2)
+                    eps_file.write(f"{name_x} {top_margin - 30} moveto\n")
+                    eps_file.write(f"({wall_info['name']}) dup stringwidth pop 2 div neg 0 rmoveto show\n\n")
+                    
+                    # Add summary information below the name, but still above the wall
+                    eps_file.write("/Helvetica findfont 10 scalefont setfont\n")
+                    
+                    # Arrange summary info in a compact box to the right of each wall
+                    info_x = current_x + 10
+                    info_y = top_margin - 50 # Start position for info, above the wall
+                    
+                    # Wall dimensions
+                    eps_file.write(f"{info_x} {info_y} moveto\n")
+                    eps_file.write(f"(Dimensions: {summary['dimensions']}) show\n\n")
+                    
+                    # Baseboard
+                    baseboard_text = summary['baseboard']
+                    if baseboard_text != "None":
+                        # Ensure baseboard measurement has the dash as well
+                        baseboard_text = baseboard_text.replace("' ", "'-")
+                    eps_file.write(f"{info_x} {info_y - 15} moveto\n")
+                    eps_file.write(f"(Baseboard: {baseboard_text}) show\n\n")
+                    
+                    # Panel count
+                    eps_file.write(f"{info_x} {info_y - 30} moveto\n")
+                    eps_file.write(f"(Panels: {summary['panel_count']}) show\n\n")
+                    
+                    # Include the wall EPS content with proper positioning
+                    eps_file.write(f"gsave\n")
+                    eps_file.write(f"{current_x} {top_margin} translate\n")
+                    
+                    # Include EPS content
+                    if os.path.exists(wall_eps_path):
+                        try:
+                            with open(wall_eps_path, 'r') as wall_eps:
+                                # Skip the EPS header
+                                for line in wall_eps:
+                                    if line.startswith("%%EndComments"):
+                                        break
+                                
+                                # Now read the actual EPS content
+                                eps_content = wall_eps.read()
+                                eps_file.write(eps_content)
+                        except Exception as e:
+                            print(f"Error including EPS content: {str(e)}")
+                            # Try reopening the file and reading all content
+                            try:
+                                with open(wall_eps_path, 'r') as wall_eps:
+                                    wall_eps.seek(0)
+                                    eps_content = wall_eps.read()
+                                    eps_file.write(eps_content)
+                            except Exception as e2:
+                                print(f"Failed again: {str(e2)}")
+                    
+                    eps_file.write(f"grestore\n\n")
+                    
+                    # Move to next wall position
+                    current_x += wall_info['width'] + wall_padding
+                
+                # End the EPS file
+                eps_file.write("%%EOF\n")
+            
+            # Copy to final destination
+            import shutil
+            shutil.copy2(combined_eps_path, save_path)
+            
+            # Check if the EPS file was created successfully
+            success = os.path.exists(save_path) and os.path.getsize(save_path) > 0
+            
+            # Clean up temporary files
+            progress_bar.set(1.0)
+            status_label.configure(text="Cleaning up...")
+            self.update()
+            
+            try:
+                # Clean up temporary directory
+                if success:
+                    shutil.rmtree(temp_dir)
+            except:
+                pass
+            
+            # Close progress window
+            progress_bar.set(1.0)
+            status_label.configure(text="Export complete!")
+            self.update()
+            progress_window.after(1000, progress_window.destroy)
+            
+            # Restore the original wall
+            self.switching_walls = True
+            for wall in self.walls:
+                if wall.id == original_wall_id:
+                    tab_name = wall.name
+                    self.walls_tabview.set(tab_name)
+                    break
+            self.current_active_wall_id = original_wall_id
+            
+            # Restore original baseboard state
+            self.baseboard_var.set(original_baseboard_enabled)
+            self.use_baseboard = original_use_baseboard
+            
+            # Load the original data without saving
+            self.load_current_wall_data()
+            self.switching_walls = False
+            self.calculate()
+            
+            if success:
+                messagebox.showinfo("Success", f"All walls exported to EPS with balanced padding: {save_path}")
+            else:
+                messagebox.showerror("Error", "Failed to create EPS file")
+                    
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export all walls: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Close progress window if it exists
+            if 'progress_window' in locals():
+                progress_window.destroy()
+        
+        # Restore UI state if needed
+        self.switching_walls = False
+        self.calculate()
+
+
+    
+    def on_wall_tab_change(self):
+        """Handle tab change event"""
+        try:
+            # Set flag to indicate we're switching walls
+            self.switching_walls = True
+            
+            # Get the current tab
+            current_tab = self.walls_tabview.get()
+            print(f"Changed to tab: {current_tab}")
+            
+            # Save data from the current wall before switching
+            if self.current_active_wall_id is not None:
+                old_wall = None
+                for wall in self.walls:
+                    if wall.id == self.current_active_wall_id:
+                        old_wall = wall
+                        break
+                        
+                if old_wall:
+                    print(f"Saving data from: {old_wall.name}")
+                    self.save_current_wall_data()
+            
+            # If the "+" tab is selected, add a new wall
+            if current_tab == "+":
+                print("Adding new wall...")
+                new_wall = self.add_new_wall()
+                # Don't return here - the new wall becomes the current wall
+            else:
+                # Load data for the selected wall
+                print(f"Loading wall data for {current_tab}")
+                
+                # Find the wall object for the selected tab
+                new_wall = None
+                for wall in self.walls:
+                    if wall.name == current_tab:
+                        new_wall = wall
+                        break
+                
+                if not new_wall:
+                    print(f"Error: Could not find wall for tab {current_tab}")
+                    self.switching_walls = False
+                    return
+                
+                # Important: Store the new active wall ID
+                self.current_active_wall_id = new_wall.id
+                
+                # Load the wall data
+                self.load_current_wall_data()
+            
+            # Update window title and wall status header
+            self.title(f"Wallcovering Calculator - {current_tab}")
+            self.update_wall_status()
+            
+            # Clear the switching flag and force a redraw
+            self.switching_walls = False
+            self.calculate()
+            
+        except Exception as e:
+            print(f"Error during tab change: {e}")
+            import traceback
+            traceback.print_exc()
+            self.switching_walls = False  # Reset flag in case of error
+    def update_wall_status(self):
+        """Update status to show current wall info"""
+        current_wall = self.get_current_wall()
+        if not current_wall:
+            return
+        
+        # If we don't have a status label yet, create one
+        if not hasattr(self, 'wall_status_label'):
+            self.wall_status_label = ctk.CTkLabel(
+                self.canvas_frame,
+                text="",
+                corner_radius=0,
+                fg_color="white",
+                text_color="black",
+                width=200,
+                height=25
+            )
+            self.wall_status_label.place(x=10, y=10)
+        
+        # Update the label text
+        print(f"Updating wall status header to: {current_wall.name} (ID: {current_wall.id})")
+        self.wall_status_label.configure(text=f"Active: {current_wall.name}")
+        
+        # Force the label to be on top of everything else
+        self.wall_status_label.lift()
+        
+        # Update the bottom tab display if it exists
+        if hasattr(self, 'bottom_tab_frame'):
+            # Update which tab is selected
+            for button in self.bottom_tab_frame.winfo_children():
+                if isinstance(button, ctk.CTkButton) and button.cget("text") == current_wall.name:
+                    button.configure(fg_color="#1E88E5")  # Highlight the active tab
+                else:
+                    button.configure(fg_color="#757575")  # Reset other tabs
+    def get_current_wall(self):
+        """Get the currently active wall object by ID first, then by tab if necessary"""
+        if hasattr(self, 'current_active_wall_id') and self.current_active_wall_id is not None:
+            # Look for wall by ID first (more reliable)
+            for wall in self.walls:
+                if wall.id == self.current_active_wall_id:
+                    return wall
+                    
+        # Fallback to finding by tab name
+        current_tab = self.walls_tabview.get()
+        
+        # If "+" tab, return None
+        if current_tab == "+":
+            return None
+        
+        # Find wall by tab name
+        for wall in self.walls:
+            if wall.name == current_tab:
+                # Update the active wall ID for future reference
+                if hasattr(self, 'current_active_wall_id'):
+                    self.current_active_wall_id = wall.id
+                return wall
+        
+        return None
+    def force_save_current_wall(self):
+        """Explicitly save the current wall's state"""
+        current_wall = self.get_current_wall()
+        if not current_wall:
+            return
+            
+        print(f"Force saving wall: {current_wall.name}")
+        
+        # Direct dimension save is most critical
+        current_wall.dimensions = {
+            "width": Dimension(
+                self.safe_int_conversion(self.wall_width_feet_var.get(), 0),
+                self.safe_int_conversion(self.wall_width_inches_var.get(), 0)
+            ),
+            "width_fraction": self.wall_width_fraction_var.get(),
+            "height": Dimension(
+                self.safe_int_conversion(self.wall_height_feet_var.get(), 0),
+                self.safe_int_conversion(self.wall_height_inches_var.get(), 0)
+            ),
+            "height_fraction": self.wall_height_fraction_var.get()
+        }
+        
+        # Also save panel dimensions
+        current_wall.panel_dimensions = {
+            "width": Dimension(
+                self.safe_int_conversion(self.panel_width_feet_var.get(), 0),
+                self.safe_int_conversion(self.panel_width_inches_var.get(), 0)
+            ),
+            "width_fraction": self.panel_width_fraction_var.get(),
+            "height": Dimension(
+                self.safe_int_conversion(self.panel_height_feet_var.get(), 0),
+                self.safe_int_conversion(self.panel_height_inches_var.get(), 0)
+            ),
+            "height_fraction": self.panel_height_fraction_var.get()
+        }
+        
+        # Save the complete state (optional)
+        self.save_current_wall_data()
+    def setup_variable_traces(self):
+        """Set up variable traces to prevent excessive calculations"""
+        
+        # Use a delay timer for dimension changes
+        def delayed_calculate(*args):
+            if hasattr(self, '_calc_timer'):
+                self.after_cancel(self._calc_timer)
+            self._calc_timer = self.after(200, self.calculate)  # 200ms delay
+        
+        # Trace dimension variables with delay
+        self.wall_width_feet_var.trace_add("write", delayed_calculate)
+        self.wall_width_inches_var.trace_add("write", delayed_calculate)
+        self.wall_height_feet_var.trace_add("write", delayed_calculate)
+        self.wall_height_inches_var.trace_add("write", delayed_calculate)        
+    def load_current_wall_data(self):
+        """Optimized wall data loading with calculation prevention"""
+        current_wall = self.get_current_wall()
+        if not current_wall:
+            return
+        
+        print(f"LOAD: Loading wall: {current_wall.name} (ID: {current_wall.id}) with height {current_wall.dimensions['height'].feet}'{current_wall.dimensions['height'].inches}\"")
+        
+        # Temporarily prevent calculations during loading
+        old_calc_flag = getattr(self, 'calculation_in_progress', False)
+        self.calculation_in_progress = True
+        
+        try:
+            # Update UI elements with current wall data
+            self.wall_width_feet_var.set(str(current_wall.dimensions["width"].feet))
+            self.wall_width_inches_var.set(str(current_wall.dimensions["width"].inches))
+            self.wall_width_fraction_var.set(current_wall.dimensions.get("width_fraction", "0"))
+            
+            self.wall_height_feet_var.set(str(current_wall.dimensions["height"].feet))
+            self.wall_height_inches_var.set(str(current_wall.dimensions["height"].inches))
+            self.wall_height_fraction_var.set(current_wall.dimensions.get("height_fraction", "0"))
+            
+            # Update panel dimensions
+            if hasattr(current_wall, 'panel_dimensions'):
+                pd = current_wall.panel_dimensions
+                self.panel_width_feet_var.set(str(pd["width"].feet))
+                self.panel_width_inches_var.set(str(pd["width"].inches))
+                self.panel_width_fraction_var.set(pd.get("width_fraction", "0"))
+                
+                self.panel_height_feet_var.set(str(pd["height"].feet))
+                self.panel_height_inches_var.set(str(pd["height"].inches))
+                self.panel_height_fraction_var.set(pd.get("height_fraction", "0"))
+            
+            # Load all other properties...
+            self.equal_panels_var.set(current_wall.use_equal_panels)
+            self.panel_count_var.set(str(current_wall.panel_count))
+            self.center_panels_var.set(current_wall.use_center_panels)
+            self.center_panel_count_var.set(str(current_wall.center_panel_count))
+            
+            # Load colors
+            self.panel_color = current_wall.panel_color
+            self.panel_border_color = current_wall.panel_border_color
+            if hasattr(self, 'color_preview'):
+                self.color_preview.configure(bg=self.panel_color)
+            if hasattr(self, 'border_color_preview'):
+                self.border_color_preview.configure(bg=self.panel_border_color)
+            
+            # Load other settings...
+            if hasattr(self, 'show_dimensions_var'):
+                self.show_dimensions_var.set(current_wall.show_dimensions)
+            if hasattr(current_wall, 'show_object_distances') and hasattr(self, 'show_object_distances_var'):
+                self.show_object_distances_var.set(current_wall.show_object_distances)
+            
+            # CRITICAL: Load baseboard settings LAST and update UI accordingly
+            print(f"  Loading baseboard state: {current_wall.baseboard_enabled}")
+            self.baseboard_var.set(current_wall.baseboard_enabled)
+            self.use_baseboard = current_wall.baseboard_enabled
+            self.baseboard_height = current_wall.baseboard_height
+            self.baseboard_height_var.set(str(current_wall.baseboard_height))
+            
+            # Update UI visibility for baseboard
+            if current_wall.baseboard_enabled:
+                if hasattr(self, 'baseboard_frame'):
+                    self.baseboard_frame.pack(pady=5, fill=tk.X)
+            else:
+                if hasattr(self, 'baseboard_frame'):
+                    self.baseboard_frame.pack_forget()
+            
+            # Load complex objects
+            import copy
+            self.custom_panel_widths = copy.deepcopy(current_wall.custom_panel_widths)
+            self.split_panels = copy.deepcopy(current_wall.split_panels)
+            self.wall_objects = copy.deepcopy(current_wall.wall_objects)
+            self.selected_panels = current_wall.selected_panels.copy()
+            self.annotation_circles = copy.deepcopy(current_wall.annotation_circles)
+            
+            print(f"LOAD: Completed loading {current_wall.name}")
+            
+        finally:
+            # Restore calculation flag
+            self.calculation_in_progress = old_calc_flag
+        
+        # Force a single calculation after loading is complete
+        self.after_idle(self.calculate)
+
+    def update_ui_visibility(self):
+        """Update UI element visibility based on current settings"""
+        print(f"Updating UI visibility - baseboard_var: {self.baseboard_var.get()}")
+        
+        # Show/hide baseboard frame
+        if self.baseboard_var.get():
+            if hasattr(self, 'baseboard_frame') and self.baseboard_frame.winfo_exists():
+                print("  Showing baseboard frame")
+                # Force the widget to be packed if it exists
+                self.baseboard_frame.pack(pady=5, fill=tk.X)
+        else:
+            if hasattr(self, 'baseboard_frame') and self.baseboard_frame.winfo_exists():
+                print("  Hiding baseboard frame")
+                self.baseboard_frame.pack_forget()
+        
+        # Show/hide floor mounting related controls
+        if hasattr(self, 'floor_mounted_var') and not self.floor_mounted_var.get():
+            if hasattr(self, 'height_offset_frame'):
+                for widget in self.wall_frame.winfo_children():
+                    if isinstance(widget, ctk.CTkFrame) and hasattr(widget, 'winfo_children') and len(widget.winfo_children()) > 0:
+                        first_child = widget.winfo_children()[0]
+                        if hasattr(first_child, 'cget') and first_child.cget("text") == "Panel Options":
+                            self.height_offset_frame.pack(in_=widget, pady=5, fill=tk.X)
+                            break
+        else:
+            if hasattr(self, 'height_offset_frame'):
+                self.height_offset_frame.pack_forget()
+        
+        # Show/hide panel layout controls
+        if self.equal_panels_var.get():
+            if hasattr(self, 'panel_count_frame'):
+                self.panel_count_frame.pack(pady=5)
+            if hasattr(self, 'center_panel_inputs'):
+                self.center_panel_inputs.pack_forget()
+        else:
+            if hasattr(self, 'panel_count_frame'):
+                self.panel_count_frame.pack_forget()
+        
+        if self.center_panels_var.get():
+            if hasattr(self, 'center_panel_inputs'):
+                self.center_panel_inputs.pack(pady=5)
+            if hasattr(self, 'panel_count_frame'):
+                self.panel_count_frame.pack_forget()
+        else:
+            if hasattr(self, 'center_panel_inputs'):
+                self.center_panel_inputs.pack_forget()
+                
+        # Force update UI to show changes immediately
+        self.update()
+        
+
+    def save_current_wall_data(self):
+        """Save current UI data to the current wall object"""
+        current_wall = self.get_current_wall()
+        if not current_wall:
+            return
+        
+        print(f"Saving data for wall: {current_wall.name} (ID: {current_wall.id})")
+        print(f"  Current baseboard state: UI={self.baseboard_var.get()}, wall={current_wall.baseboard_enabled}")
+        
+        # Save wall dimensions - explicitly get values from UI variables
+        current_wall.dimensions = {
+            "width": Dimension(
+                self.safe_int_conversion(self.wall_width_feet_var.get(), 0),
+                self.safe_int_conversion(self.wall_width_inches_var.get(), 0)
+            ),
+            "width_fraction": self.wall_width_fraction_var.get(),
+            "height": Dimension(
+                self.safe_int_conversion(self.wall_height_feet_var.get(), 0),
+                self.safe_int_conversion(self.wall_height_inches_var.get(), 0)
+            ),
+            "height_fraction": self.wall_height_fraction_var.get()
+        }
+        
+        # Save panel dimensions
+        current_wall.panel_dimensions = {
+            "width": Dimension(
+                self.safe_int_conversion(self.panel_width_feet_var.get(), 0),
+                self.safe_int_conversion(self.panel_width_inches_var.get(), 0)
+            ),
+            "width_fraction": self.panel_width_fraction_var.get(),
+            "height": Dimension(
+                self.safe_int_conversion(self.panel_height_feet_var.get(), 0),
+                self.safe_int_conversion(self.panel_height_inches_var.get(), 0)
+            ),
+            "height_fraction": self.panel_height_fraction_var.get()
+        }
+        
+        # Save panel options
+        current_wall.use_equal_panels = self.equal_panels_var.get()
+        current_wall.panel_count = self.safe_int_conversion(self.panel_count_var.get(), 2)
+        current_wall.use_center_panels = self.center_panels_var.get()
+        current_wall.center_panel_count = self.safe_int_conversion(self.center_panel_count_var.get(), 4)
+        
+        # Save baseboard settings - CRITICAL: Use UI state directly and log it
+        current_wall.baseboard_enabled = self.baseboard_var.get()
+        current_wall.baseboard_height = self.safe_int_conversion(self.baseboard_height_var.get(), 4)
+        if hasattr(self, 'baseboard_fraction_var'):
+            current_wall.baseboard_fraction = self.baseboard_fraction_var.get()
+        
+        print(f"  After save: wall.baseboard_enabled={current_wall.baseboard_enabled}")
+        
+        # Save floor mounting settings
+        current_wall.floor_mounted = self.floor_mounted_var.get()
+        
+        # Save height offset for non-floor mounted panels
+        if hasattr(self, 'floor_mounted_var') and not self.floor_mounted_var.get() and hasattr(self, 'height_offset_feet_var'):
+            current_wall.height_offset = Dimension(
+                self.safe_int_conversion(self.height_offset_feet_var.get(), 0),
+                self.safe_int_conversion(self.height_offset_inches_var.get(), 0)
+            )
+            if hasattr(self, 'height_offset_fraction_var'):
+                current_wall.height_offset_fraction = self.height_offset_fraction_var.get()
+        else:
+            # Ensure height_offset is set to None if floor mounted
+            current_wall.height_offset = None
+            current_wall.height_offset_fraction = "0"
+        
+        # Save colors
+        current_wall.panel_color = self.panel_color
+        current_wall.panel_border_color = self.panel_border_color
+        
+        # Save display settings
+        current_wall.show_dimensions = self.show_dimensions_var.get()
+        if hasattr(self, 'show_object_distances_var'):
+            current_wall.show_object_distances = self.show_object_distances_var.get()
+        if hasattr(self, 'show_horizontal_distances_var'):
+            current_wall.show_horizontal_distances = self.show_horizontal_distances_var.get()
+        if hasattr(self, 'distance_reference_var'):
+            current_wall.distance_reference = self.distance_reference_var.get()
+        
+        # Save custom name
+        if hasattr(self, 'custom_name_var'):
+            current_wall.custom_name = self.custom_name_var.get()
+        
+        # *** KEY FIX: Calculate and save current panels ***
+        current_panels = self.calculate_panels()
+        import copy
+        current_wall.panels = copy.deepcopy(current_panels)
+        
+        # Save panel configurations 
+        current_wall.custom_panel_widths = copy.deepcopy(self.custom_panel_widths) if hasattr(self, 'custom_panel_widths') else {}
+        current_wall.split_panels = copy.deepcopy(self.split_panels) if hasattr(self, 'split_panels') else {}
+        current_wall.wall_objects = copy.deepcopy(self.wall_objects) if hasattr(self, 'wall_objects') else []
+        current_wall.selected_panels = self.selected_panels.copy() if hasattr(self, 'selected_panels') else []
+        current_wall.annotation_circles = copy.deepcopy(self.annotation_circles) if hasattr(self, 'annotation_circles') else []
+        
+        # Save ID counters
+        current_wall.next_object_id = self.next_object_id if hasattr(self, 'next_object_id') else 1
+        current_wall.next_annotation_id = self.next_annotation_id if hasattr(self, 'next_annotation_id') else 1
+        
+        print(f"Wall {current_wall.name} saved with {len(current_wall.panels)} panels and height {current_wall.dimensions['height'].feet}'{current_wall.dimensions['height'].inches}\"")
+        print(f"  Final baseboard state: {current_wall.baseboard_enabled}")
+
+    
     def toggle_horizontal_position_mode(self):
         """Toggle between alignment and exact horizontal positioning"""
         if self.use_exact_h_position_var.get():
@@ -2058,7 +3645,8 @@ class WallcoveringCalculatorUI(ctk.CTk):
         self.create_object_controls(self.objects_frame)
         self.create_export_controls(self.export_frame)
         self.create_advanced_controls(self.advanced_frame)
-        self.create_about_controls(self.about_frame) 
+        self.create_about_controls(self.about_frame)
+        
     def export_ultra_quality(self):
         """Export canvas at ultra-high resolution using direct rendering instead of screenshots"""
         try:
@@ -3847,6 +5435,8 @@ with precise measurements and customizable configurations.
 
     def on_equal_panels_change(self):
         """Handle equal panels checkbox change"""
+        self.save_current_wall_data()  # This line should be properly indented
+        
         if self.equal_panels_var.get():
             self.panel_count_frame.pack(pady=5)
             self.center_panels_var.set(False)
@@ -3871,13 +5461,34 @@ with precise measurements and customizable configurations.
         self.calculate()
 
     def on_baseboard_change(self):
-        """Handle baseboard checkbox change"""
+        """Optimized baseboard change handler"""
+        print(f"Baseboard state changed to: {self.baseboard_var.get()}")
+        
+        # Update instance variable
+        self.use_baseboard = self.baseboard_var.get()
+        
+        # Show/hide baseboard frame based on checkbox state
         if self.baseboard_var.get():
-            self.baseboard_frame.pack(pady=5)
+            if hasattr(self, 'baseboard_frame'):
+                self.baseboard_frame.pack(pady=5, fill=tk.X)
         else:
-            self.baseboard_frame.pack_forget()
-        self.calculate()
-
+            if hasattr(self, 'baseboard_frame'):
+                self.baseboard_frame.pack_forget()
+        
+        # CRITICAL: Save the current wall data immediately
+        current_wall = self.get_current_wall()
+        if current_wall:
+            print(f"  Immediately saving baseboard state to wall: {current_wall.name}")
+            current_wall.baseboard_enabled = self.baseboard_var.get()
+            
+            # Also save all wall data to ensure consistency
+            self.save_current_wall_data()
+        
+        # Use a delayed calculation to prevent multiple rapid calculations
+        if hasattr(self, '_baseboard_timer'):
+            self.after_cancel(self._baseboard_timer)
+        
+        self._baseboard_timer = self.after(100, self.calculate)  # 100ms delay
 
         
     def choose_color(self):
@@ -3895,31 +5506,48 @@ with precise measurements and customizable configurations.
         self.wall_width_inches_var.set("0")
         self.wall_height_feet_var.set("0")
         self.wall_height_inches_var.set("0")
-            # Reset fractions
+        
+        # Reset fractions
         self.wall_width_fraction_var.set("0")
         self.wall_height_fraction_var.set("0")
         self.panel_width_fraction_var.set("0")
         self.panel_height_fraction_var.set("0")
         if hasattr(self, 'baseboard_fraction_var'):
             self.baseboard_fraction_var.set("0")
+            
         # Reset panel dimensions
         self.panel_width_feet_var.set("0")
         self.panel_width_inches_var.set("0")
         self.panel_height_feet_var.set("0")
         self.panel_height_inches_var.set("0")
         self.show_dimensions_var.set(True)  # Reset to showing dimensions
+        
         # Reset options
         self.equal_panels_var.set(False)
         self.panel_count_var.set("2")
         self.center_panels_var.set(False)
         self.center_panel_count_var.set("4")
+        
+        # Reset baseboard options
         self.baseboard_var.set(False)
         self.baseboard_height_var.set("4")
+        if hasattr(self, 'baseboard_frame'):
+            self.baseboard_frame.pack_forget()
+        
+        # Reset floor mounting options
+        self.floor_mounted_var.set(True)  # Default to floor mounted
+        if hasattr(self, 'height_offset_frame'):
+            self.height_offset_frame.pack_forget()
+        self.height_offset_feet_var.set("0")
+        self.height_offset_inches_var.set("0")
+        self.height_offset_fraction_var.set("0")
+        
         # Reset colors
         self.panel_color = "#FFFFFF"
         self.panel_border_color = "red"
         self.color_preview.configure(bg=self.panel_color)
         self.border_color_preview.configure(bg=self.panel_border_color)
+        
         # Reset panel adjustments
         if hasattr(self, 'custom_panel_widths'):
             self.custom_panel_widths = {}
@@ -3927,10 +5555,7 @@ with precise measurements and customizable configurations.
         # Reset split panels
         if hasattr(self, 'split_panels'):
             self.split_panels = {}
-        # Reset color
-        self.panel_color = "#FFFFFF"
-        self.color_preview.configure(bg=self.panel_color)
-        
+            
         # Clear canvas
         self.canvas.delete("all")
         
@@ -3954,12 +5579,13 @@ with precise measurements and customizable configurations.
         return Dimension(feet, inches)
 
     def format_dimension(self, dimension: Dimension, fraction: str = "0") -> str:
+        """Format dimensions with dash between feet and inches - UPDATED"""
         if dimension.inches == 0 and fraction == "0":
             return f"{dimension.feet}'"
         elif fraction == "0":
-            return f"{dimension.feet}' {dimension.inches}\""
+            return f"{dimension.feet}'-{dimension.inches}\""
         else:
-            return f"{dimension.feet}' {dimension.inches} {fraction}\""
+            return f"{dimension.feet}'-{dimension.inches} {fraction}\""
     def add_panel_adjustment_system(self):
         """Add UI for adjusting individual panel widths"""
         try:
@@ -4187,6 +5813,11 @@ with precise measurements and customizable configurations.
             traceback.print_exc()
         
     def calculate_panels(self) -> List[Panel]:
+            # Add debugging
+        current_wall = self.get_current_wall()
+        if current_wall:
+            print(f"Calculating panels for: {current_wall.name} with height {current_wall.dimensions['height'].feet}'{current_wall.dimensions['height'].inches}\"")
+        
         # Update dimensions from UI with safe conversion
         wall_width_feet = self.safe_int_conversion(self.wall_width_feet_var.get(), 0)
         wall_width_inches = self.safe_int_conversion(self.wall_width_inches_var.get(), 0)
@@ -4310,7 +5941,10 @@ with precise measurements and customizable configurations.
                     height=panel_height_dim,
                     height_fraction=panel_height_frac,
                     color=self.panel_color,
-                    border_color=self.panel_border_color  # Add this line
+                    border_color=self.panel_border_color,
+                    floor_mounted=floor_mounted,
+                    height_offset=height_offset_dim if not floor_mounted else None,
+                    height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                 )
                 panels.append(panel)
                 current_x_percent += panel_width_percent  # Update x position for next panel
@@ -4342,7 +5976,10 @@ with precise measurements and customizable configurations.
                         height=panel_height_dim,
                         height_fraction=panel_height_frac,
                         color=self.panel_color,
-                        border_color=self.panel_border_color  # Add this line
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                     ))
 
                 # Add center panels
@@ -4357,7 +5994,10 @@ with precise measurements and customizable configurations.
                         height=panel_height_dim,
                         height_fraction=panel_height_frac,
                         color=self.panel_color,
-                        border_color=self.panel_border_color  # Add this line
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                     ))
 
                 # Add right panel if applicable
@@ -4372,9 +6012,18 @@ with precise measurements and customizable configurations.
                         height=panel_height_dim,
                         height_fraction=panel_height_frac,
                         color=self.panel_color,
-                        border_color=self.panel_border_color  # Add this line
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                     ))
-                    
+            # In calculate_panels method, add this elif condition:
+            elif self.use_start_seam_var.get():
+                # Use start seam positioning
+                panels = self.calculate_start_seam_panels(
+                    wall_width_inches_total, panel_height_dim, panel_height_frac,
+                    floor_mounted, height_offset_dim, height_offset_fraction
+                )                    
             # Equal Panels Logic
             elif self.use_equal_panels:
                 base_panel_width = wall_width_inches_total / self.panel_count
@@ -4391,7 +6040,10 @@ with precise measurements and customizable configurations.
                         height=panel_height_dim,
                         height_fraction=panel_height_frac,
                         color=self.panel_color,
-                        border_color=self.panel_border_color  # Add this line
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                     ))
                     current_x += base_panel_width
                     
@@ -4421,7 +6073,10 @@ with precise measurements and customizable configurations.
                         height=panel_height_dim,
                         height_fraction=panel_height_frac,
                         color=self.panel_color,
-                        border_color=self.panel_border_color  # Add this line
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                     ))
                     current_x += panel_width_inches_total
                     panel_id += 1
@@ -4481,7 +6136,10 @@ with precise measurements and customizable configurations.
                     height=panel.height,
                     height_fraction=panel.height_fraction,
                     color=panel.color,
-                    border_color=self.panel_border_color  # Add this line
+                    border_color=self.panel_border_color,
+                    floor_mounted=floor_mounted,
+                    height_offset=height_offset_dim if not floor_mounted else None,
+                    height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                 )
                 final_panels.append(left_panel)
                 processed_ids.add(panel.id)
@@ -4500,7 +6158,10 @@ with precise measurements and customizable configurations.
                     height=panel.height,
                     height_fraction=panel.height_fraction,
                     color=panel.color,
-                    border_color=self.panel_border_color  # Add this line
+                    border_color=self.panel_border_color,
+                    floor_mounted=floor_mounted,
+                    height_offset=height_offset_dim if not floor_mounted else None,
+                    height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
                 )
                 final_panels.append(right_panel)
                 processed_ids.add(right_id)
@@ -5195,7 +6856,23 @@ with precise measurements and customizable configurations.
             text="Note: Select a single panel first, then click to split"
         )
         instruction_label.pack(pady=2)
+    def on_dimension_change(self, *args):
+        """Save wall data when dimensions are changed"""
+        current_wall = self.get_current_wall()
+        if current_wall:
+            self.save_current_wall_data()
 
+    # Add this method to bind variable changes to auto-saving
+    def setup_auto_save_bindings(self):
+        """Set up bindings to auto-save wall data when values change"""
+        # Bind dimension variables
+        self.wall_width_feet_var.trace_add("write", self.on_dimension_change)
+        self.wall_width_inches_var.trace_add("write", self.on_dimension_change)
+        self.wall_width_fraction_var.trace_add("write", self.on_dimension_change)
+        
+        self.wall_height_feet_var.trace_add("write", self.on_dimension_change)
+        self.wall_height_inches_var.trace_add("write", self.on_dimension_change)
+        self.wall_height_fraction_var.trace_add("write", self.on_dimension_change)
     def split_selected_panel(self):
         """Split a selected panel into two equal panels"""
         if len(self.selected_panels) != 1:
@@ -5546,6 +7223,7 @@ with precise measurements and customizable configurations.
         color = colorchooser.askcolor(color=self.object_border_color_preview["background"], title="Choose Object Border Color")
         if color[1]:  # color is ((R, G, B), hex_color)
             self.object_border_color_preview.configure(bg=color[1])
+            
 
     
     def draw_dimension_line(self, x1, y1, x2, y2, dimension: Dimension, fraction: str = "0", offset=20, side="top"):
@@ -5591,7 +7269,11 @@ with precise measurements and customizable configurations.
         self.canvas.create_text(text_x, text_y, text=text, anchor=anchor)
 
     def draw_wall(self, panels: List[Panel]):
+        """Draw wall with panels and baseboard if enabled"""
         self.canvas.delete("all")
+        
+        # Add debug output to track baseboard state at drawing time
+        print(f"DRAW_WALL: baseboard_enabled={self.baseboard_var.get()}, use_baseboard={self.use_baseboard}")
         
         # Calculate scaling factors
         canvas_width = self.canvas.winfo_width()
@@ -5620,7 +7302,10 @@ with precise measurements and customizable configurations.
         if hasattr(self, 'baseboard_fraction_var'):
             baseboard_height_inches += self.fraction_to_decimal(self.baseboard_fraction_var.get())
             
-        if self.use_baseboard:
+        # CRITICAL: Direct check of baseboard_var state, not instance variable
+        use_baseboard = self.baseboard_var.get()
+        
+        if use_baseboard:
             visual_usable_height -= baseboard_height_inches
         
         # Calculate aspect ratio and scaling
@@ -5638,7 +7323,7 @@ with precise measurements and customizable configurations.
         scaled_height = wall_height_inches * scale
         
         # Calculate baseboard height if used
-        baseboard_height = baseboard_height_inches * scale if self.use_baseboard else 0
+        baseboard_height = baseboard_height_inches * scale if use_baseboard else 0
         
         x_offset = (canvas_width - scaled_width) / 2
         y_offset = (canvas_height - scaled_height) / 2
@@ -5678,6 +7363,21 @@ with precise measurements and customizable configurations.
             fixed_panels.append(fixed_panel)
             current_x_percent += panel.width  # Update for next panel
         
+        # CRITICAL: Draw baseboard BEFORE panels to ensure panels are on top
+        # Draw baseboard if enabled - directly check baseboard_var
+        if use_baseboard:
+            print(f"  Drawing baseboard: height={baseboard_height_inches} inches, {baseboard_height} pixels")
+            self.canvas.create_rectangle(
+                x_offset,
+                y_offset + scaled_height - baseboard_height,
+                x_offset + scaled_width,
+                y_offset + scaled_height,
+                fill="gray",
+                outline="black",  # Add outline for better visibility
+                width=1,
+                tags=["baseboard"]  # Add a tag for identification
+            )
+        
         # Now draw the fixed panels
         for panel in fixed_panels:
             panel_x = x_offset + (panel.x / 100 * scaled_width)
@@ -5698,7 +7398,7 @@ with precise measurements and customizable configurations.
                 
             if floor_mounted:
                 # Floor mounted panels start from bottom (minus baseboard if used)
-                if self.use_baseboard:
+                if use_baseboard:
                     panel_bottom = y_offset + scaled_height - baseboard_height
                 else:
                     panel_bottom = y_offset + scaled_height
@@ -5719,7 +7419,7 @@ with precise measurements and customizable configurations.
                 panel_bottom = y_offset + scaled_height - height_offset_scaled
                 
                 # If there's a baseboard, make sure the panel is above it
-                if self.use_baseboard:
+                if use_baseboard:
                     min_bottom = y_offset + scaled_height - baseboard_height
                     panel_bottom = min(panel_bottom, min_bottom)
                 
@@ -5769,7 +7469,7 @@ with precise measurements and customizable configurations.
                 
             if floor_mounted:
                 # Floor mounted panels start from bottom (minus baseboard if used)
-                if self.use_baseboard:
+                if use_baseboard:
                     panel_bottom = y_offset + scaled_height - baseboard_height
                 else:
                     panel_bottom = y_offset + scaled_height
@@ -5790,7 +7490,7 @@ with precise measurements and customizable configurations.
                 panel_bottom = y_offset + scaled_height - height_offset_scaled
                 
                 # If there's a baseboard, make sure the panel is above it
-                if self.use_baseboard:
+                if use_baseboard:
                     min_bottom = y_offset + scaled_height - baseboard_height
                     panel_bottom = min(panel_bottom, min_bottom)
                 
@@ -5806,16 +7506,6 @@ with precise measurements and customizable configurations.
                 fill="black",
                 font=("Arial", 8, "bold"),
                 anchor="center"
-            )
-
-        # Draw baseboard if enabled
-        if self.use_baseboard:
-            self.canvas.create_rectangle(
-                x_offset,
-                y_offset + scaled_height - baseboard_height,
-                x_offset + scaled_width,
-                y_offset + scaled_height,
-                fill="gray"
             )
         
         # Highlight selected panels (using the original panel IDs but fixed positions)
@@ -5841,7 +7531,7 @@ with precise measurements and customizable configurations.
                             
                         if floor_mounted:
                             # Floor mounted panels start from bottom (minus baseboard if used)
-                            if self.use_baseboard:
+                            if use_baseboard:
                                 panel_bottom = y_offset + scaled_height - baseboard_height
                             else:
                                 panel_bottom = y_offset + scaled_height
@@ -5862,7 +7552,7 @@ with precise measurements and customizable configurations.
                             panel_bottom = y_offset + scaled_height - height_offset_scaled
                             
                             # If there's a baseboard, make sure the panel is above it
-                            if self.use_baseboard:
+                            if use_baseboard:
                                 min_bottom = y_offset + scaled_height - baseboard_height
                                 panel_bottom = min(panel_bottom, min_bottom)
                             
@@ -5919,7 +7609,7 @@ with precise measurements and customizable configurations.
                     
                 if floor_mounted:
                     # Floor mounted panels start from bottom (minus baseboard if used)
-                    if self.use_baseboard:
+                    if use_baseboard:
                         panel_bottom = y_offset + scaled_height - baseboard_height
                     else:
                         panel_bottom = y_offset + scaled_height
@@ -5940,7 +7630,7 @@ with precise measurements and customizable configurations.
                     panel_bottom = y_offset + scaled_height - height_offset_scaled
                     
                     # If there's a baseboard, make sure the panel is above it
-                    if self.use_baseboard:
+                    if use_baseboard:
                         min_bottom = y_offset + scaled_height - baseboard_height
                         panel_bottom = min(panel_bottom, min_bottom)
                     
@@ -5979,8 +7669,8 @@ with precise measurements and customizable configurations.
                     side="top"
                 )
 
-            # Draw baseboard dimension if enabled
-            if self.use_baseboard:
+            # Draw baseboard dimension if enabled - use baseboard_var for consistency
+            if use_baseboard:
                 baseboard_dim, baseboard_frac = self.convert_to_feet_inches_fraction(baseboard_height_inches)
                 self.draw_dimension_line(
                     x_offset + scaled_width + 20,
@@ -6025,15 +7715,666 @@ with precise measurements and customizable configurations.
                         side="left"
                     )
 
-    def calculate(self):
-        panels = self.calculate_panels()
-        print(f"CALCULATE: Drawing with {len(panels)} panels and {len(self.annotation_circles) if hasattr(self, 'annotation_circles') else 0} annotations")
-    
-        self.draw_wall_with_annotations(panels)
+    def refresh_summary(self):
+        """Refresh the summary and switch to the summary tab"""
+        # Set a flag that we're requesting a refresh with tab switch
+        self.summary_refresh_requested = True
         
-        # Update summary
+        # Call calculate to update panels and summary
+        self.calculate()
+        
+        # Switch to the summary tab
+        if hasattr(self, 'tab_view'):
+            self.tab_view.set("Summary")
+
+    # Modify the create_summary_controls method to use refresh_summary instead of calculate
+    def create_summary_controls(self, parent):
+        """Create controls for the Summary tab"""
+        # Create a frame for actions/settings related to summary
+        control_frame = ctk.CTkFrame(parent)
+        control_frame.pack(fill=tk.X, padx=10, pady=(0, 10), before=self.summary_text)
+        
+        # Add refresh button that uses the new refresh_summary method
+        refresh_btn = ctk.CTkButton(
+            control_frame,
+            text="Refresh Summary",
+            command=self.refresh_summary,  # Use the new method
+            fg_color="#1E88E5",
+            hover_color="#1565C0"
+        )
+        refresh_btn.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Add copy to clipboard button
+        copy_btn = ctk.CTkButton(
+            control_frame,
+            text="Copy to Clipboard",
+            command=self.copy_summary_to_clipboard,
+            fg_color="#757575",
+            hover_color="#616161"
+        )
+        copy_btn.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Add print summary button
+        print_btn = ctk.CTkButton(
+            control_frame,
+            text="Print Summary",
+            command=self.print_summary,
+            fg_color="#009688",
+            hover_color="#00796B"
+        )
+        print_btn.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # Add heading above the summary text
+        heading_label = ctk.CTkLabel(
+            parent,
+            text="Panel Summary",
+            font=("Arial", 16, "bold")
+        )
+        heading_label.pack(before=self.summary_text, pady=(0, 5))
+        
+        # Add formatting options
+        format_frame = ctk.CTkFrame(parent)
+        format_frame.pack(fill=tk.X, padx=10, pady=(0, 10), before=self.summary_text)
+        
+        ctk.CTkLabel(format_frame, text="Format:").pack(side=tk.LEFT, padx=5)
+        
+        # Format options dropdown
+        self.summary_format_var = tk.StringVar(value="Standard")
+        format_dropdown = ctk.CTkOptionMenu(
+            format_frame,
+            variable=self.summary_format_var,
+            values=["Standard", "Detailed", "Compact"],
+            command=self.change_summary_format
+        )
+        format_dropdown.pack(side=tk.LEFT, padx=5)
+
+    def print_summary(self):
+        """Print the summary text"""
+        try:
+            import tempfile
+            import os
+            import webbrowser
+            
+            # Create a temporary HTML file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w') as f:
+                temp_path = f.name
+                
+                # Write HTML content
+                f.write("<html><head>")
+                f.write("<title>Wall Panel Summary</title>")
+                f.write("<style>")
+                f.write("body { font-family: Arial, sans-serif; margin: 20px; }")
+                f.write("h1 { color: #333; }")
+                f.write("pre { background-color: #f5f5f5; padding: 10px; border-radius: 5px; }")
+                f.write("@media print { body { margin: 0.5in; } }")
+                f.write("</style></head><body>")
+                
+                # Get summary content
+                summary_content = self.summary_text.get("1.0", tk.END)
+                
+                # Add content to HTML
+                f.write("<h1>Wall Panel Summary</h1>")
+                f.write("<pre>" + summary_content + "</pre>")
+                
+                # Add footer
+                from datetime import datetime
+                current_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+                f.write(f"<p><small>Generated on {current_date}</small></p>")
+                
+                f.write("</body></html>")
+            
+            # Open the temporary file in the default browser for printing
+            webbrowser.open('file://' + temp_path)
+            
+            # Show a confirmation message
+            success_label = ctk.CTkLabel(
+                self.summary_frame,
+                text="Summary opened for printing!",
+                fg_color="#4CAF50",
+                text_color="white",
+                corner_radius=8,
+                padx=10, 
+                pady=5
+            )
+            success_label.pack(pady=10)
+            
+            # Auto-hide the success message after 2 seconds
+            self.after(2000, success_label.destroy)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to print summary: {str(e)}")
+
+    def change_summary_format(self, format_type):
+        """Change the format of the summary display"""
+        # Store current summary content
+        summary_content = self.summary_text.get("1.0", tk.END)
+        
+        # Re-format based on the selected format type
+        if format_type == "Compact":
+            # Create a compact version without blank lines and with shorter labels
+            lines = summary_content.strip().split('\n')
+            compact_lines = []
+            
+            for line in lines:
+                if line.strip():  # Skip empty lines
+                    # Shorten labels
+                    line = line.replace("Wall dimensions: ", "Wall: ")
+                    line = line.replace("Baseboard height: ", "Baseboard: ")
+                    line = line.replace("Usable height: ", "Usable: ")
+                    line = line.replace("Number of panels: ", "Panels: ")
+                    line = line.replace("Panel color: ", "Color: ")
+                    line = line.replace("  Width: ", "W: ")
+                    line = line.replace("  Height: ", "H: ")
+                    line = line.replace("  Position: ", "Pos: ")
+                    
+                    compact_lines.append(line)
+            
+            # Update summary text
+            self.summary_text.delete("1.0", tk.END)
+            self.summary_text.insert("1.0", "\n".join(compact_lines))
+            
+        elif format_type == "Detailed":
+            # Re-calculate to get a more detailed summary
+            # First store original format
+            original_format = self.summary_format_var.get()
+            
+            # We'll add more detail by recalculating with extra info
+            panels = self.calculate_panels()
+            
+            # Create a more detailed summary
+            detailed_summary = []
+            
+            # Add the current wall name to the summary
+            current_wall = self.get_current_wall()
+            if current_wall:
+                detailed_summary.append(f"Wall: {current_wall.name}")
+            
+            # Add detailed wall dimensions 
+            wall_w_inches = self.convert_to_inches(
+                self.wall_dimensions['width'].feet,
+                self.wall_dimensions['width'].inches,
+                self.wall_dimensions.get('width_fraction', '0')
+            )
+            wall_h_inches = self.convert_to_inches(
+                self.wall_dimensions['height'].feet,
+                self.wall_dimensions['height'].inches,
+                self.wall_dimensions.get('height_fraction', '0')
+            )
+            
+            detailed_summary.append(f"Wall dimensions: {self.format_dimension(self.wall_dimensions['width'], self.wall_dimensions.get('width_fraction', '0'))} × "
+                           f"{self.format_dimension(self.wall_dimensions['height'], self.wall_dimensions.get('height_fraction', '0'))}")
+            detailed_summary.append(f"Wall area: {(wall_w_inches * wall_h_inches / 144):.2f} sq ft")
+            
+            # Add more detail about each panel
+            detailed_summary.append(f"\nNumber of panels: {len(panels)}")
+            detailed_summary.append(f"Panel color: {self.panel_color}")
+            detailed_summary.append(f"Panel border color: {self.panel_border_color}")
+            
+            total_panel_area = 0
+            
+            for i, panel in enumerate(panels, 1):
+                # Calculate panel dimensions in inches
+                panel_width_inches = self.convert_to_inches(
+                    panel.actual_width.feet,
+                    panel.actual_width.inches,
+                    panel.actual_width_fraction
+                )
+                
+                panel_height_inches = self.convert_to_inches(
+                    panel.height.feet,
+                    panel.height.inches,
+                    panel.height_fraction
+                )
+                
+                # Calculate panel area in square feet
+                panel_area = (panel_width_inches * panel_height_inches) / 144  # Convert to sq ft
+                total_panel_area += panel_area
+                
+                detailed_summary.append(f"\nPanel {i}:")
+                detailed_summary.append(f"  Width: {self.format_dimension(panel.actual_width, panel.actual_width_fraction)} ({panel_width_inches:.2f} inches)")
+                detailed_summary.append(f"  Height: {self.format_dimension(panel.height, panel.height_fraction)} ({panel_height_inches:.2f} inches)")
+                detailed_summary.append(f"  Position: {panel.x:.1f}% from left")
+                detailed_summary.append(f"  Area: {panel_area:.2f} sq ft")
+            
+            # Add total panel area
+            detailed_summary.append(f"\nTotal panel area: {total_panel_area:.2f} sq ft")
+            
+            # Add information about wall objects if present
+            if hasattr(self, 'wall_objects') and self.wall_objects:
+                detailed_summary.append(f"\nWall Objects: {len(self.wall_objects)}")
+                for i, obj in enumerate(self.wall_objects, 1):
+                    detailed_summary.append(f"\nObject {i}: {obj.name}")
+                    detailed_summary.append(f"  Width: {self.format_dimension(obj.width, obj.width_fraction)}")
+                    detailed_summary.append(f"  Height: {self.format_dimension(obj.height, obj.height_fraction)}")
+                    detailed_summary.append(f"  Position: {obj.x_position:.1f}% from left, {obj.y_position:.1f}% from top")
+                    
+                    # Add affected panels
+                    if hasattr(obj, 'affected_panels') and obj.affected_panels:
+                        affected = ", ".join(map(str, obj.affected_panels))
+                        detailed_summary.append(f"  Affects panels: {affected}")
+            
+            # Add timestamp
+            from datetime import datetime
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            detailed_summary.append(f"\nSummary generated: {current_time}")
+            
+            # Update summary text
+            self.summary_text.delete("1.0", tk.END)
+            self.summary_text.insert("1.0", "\n".join(detailed_summary))
+            
+            # Reset format dropdown to avoid recursive calls
+            self.summary_format_var.set(original_format)
+            
+        else:  # Standard format - use current calculation results
+            # Just refresh the summary with standard format
+            self.calculate()
+                
+    # For any calculation actions or wall property changes, wrap them to save the current wall data
+    def on_calculate_button_click(self):
+        """Handle Calculate button click"""
+        # Already implemented in your reset_form button handler
+        self.calculate()
+
+        
+    def calculate(self):
+        """Complete optimized calculate method to prevent excessive recalculations"""
+        
+        # Prevent recursive calculations
+        if self.calculation_in_progress:
+            self.pending_calculation = True
+            return
+        
+        # Skip unnecessary calculations during wall switching
+        if hasattr(self, 'switching_walls') and self.switching_walls:
+            print("Skipping calculation during wall switching")
+            return
+        
+        # Set flag to prevent recursive calls
+        self.calculation_in_progress = True
+        
+        try:
+            # COMPLETE CALCULATION LOGIC FROM YOUR ORIGINAL METHOD
+            
+            # Add debugging
+            current_wall = self.get_current_wall()
+            if current_wall:
+                print(f"Calculating panels for: {current_wall.name} with height {current_wall.dimensions['height'].feet}'{current_wall.dimensions['height'].inches}\"")
+            
+            # Update dimensions from UI with safe conversion
+            wall_width_feet = self.safe_int_conversion(self.wall_width_feet_var.get(), 0)
+            wall_width_inches = self.safe_int_conversion(self.wall_width_inches_var.get(), 0)
+            wall_width_fraction = self.wall_width_fraction_var.get()
+            
+            wall_height_feet = self.safe_int_conversion(self.wall_height_feet_var.get(), 0)
+            wall_height_inches = self.safe_int_conversion(self.wall_height_inches_var.get(), 0)
+            wall_height_fraction = self.wall_height_fraction_var.get()
+            
+            panel_width_feet = self.safe_int_conversion(self.panel_width_feet_var.get(), 0)
+            panel_width_inches = self.safe_int_conversion(self.panel_width_inches_var.get(), 0)
+            panel_width_fraction = self.panel_width_fraction_var.get()
+            
+            panel_height_feet = self.safe_int_conversion(self.panel_height_feet_var.get(), 0)
+            panel_height_inches = self.safe_int_conversion(self.panel_height_inches_var.get(), 0)
+            panel_height_fraction = self.panel_height_fraction_var.get()
+            
+            # CRITICAL FIX: Validate before updating dimensions
+            if (wall_width_feet > 0 or wall_width_inches > 0) and (wall_height_feet > 0 or wall_height_inches > 0):
+                self.wall_dimensions = {
+                    "width": Dimension(wall_width_feet, wall_width_inches),
+                    "width_fraction": wall_width_fraction,
+                    "height": Dimension(wall_height_feet, wall_height_inches),
+                    "height_fraction": wall_height_fraction
+                }
+                
+                self.panel_dimensions = {
+                    "width": Dimension(panel_width_feet, panel_width_inches),
+                    "width_fraction": panel_width_fraction,
+                    "height": Dimension(panel_height_feet, panel_height_inches),
+                    "height_fraction": panel_height_fraction
+                }
+            else:
+                print(f"CALC: Skipping dimension update - invalid values")
+                return  # Don't proceed with invalid dimensions
+            
+            # Update other variables
+            self.use_equal_panels = self.equal_panels_var.get()
+            self.panel_count = max(1, self.safe_int_conversion(self.panel_count_var.get(), 2))
+            self.use_baseboard = self.baseboard_var.get()
+            self.baseboard_height = self.safe_int_conversion(self.baseboard_height_var.get(), 4)
+            self.baseboard_fraction = self.baseboard_fraction_var.get() if hasattr(self, 'baseboard_fraction_var') else "0"
+            floor_mounted = self.floor_mounted_var.get()
+            height_offset_feet = self.safe_int_conversion(self.height_offset_feet_var.get(), 0)
+            height_offset_inches = self.safe_int_conversion(self.height_offset_inches_var.get(), 0)
+            height_offset_fraction = self.height_offset_fraction_var.get()
+
+            height_offset_dim = Dimension(height_offset_feet, height_offset_inches)
+            
+            # Calculate wall dimensions in inches with fractions
+            wall_width_inches_total = self.convert_to_inches(
+                wall_width_feet,
+                wall_width_inches,
+                wall_width_fraction
+            )
+            
+            wall_height_inches_total = self.convert_to_inches(
+                wall_height_feet,
+                wall_height_inches,
+                wall_height_fraction
+            )
+
+            if wall_width_inches_total <= 0 or wall_height_inches_total <= 0:
+                return
+
+            # Calculate baseboard height with fraction
+            baseboard_inches_total = self.baseboard_height
+            if hasattr(self, 'baseboard_fraction_var'):
+                baseboard_inches_total += self.fraction_to_decimal(self.baseboard_fraction_var.get())
+
+            # Calculate usable height
+            usable_height_inches = wall_height_inches_total - (baseboard_inches_total if self.use_baseboard else 0)
+            if usable_height_inches <= 0:
+                return
+
+            # Calculate panel height with fraction
+            panel_height_inches_total = self.convert_to_inches(
+                panel_height_feet,
+                panel_height_inches,
+                panel_height_fraction
+            )
+            
+            panel_height_inches_total = min(panel_height_inches_total, usable_height_inches)
+            panel_height_dim, panel_height_frac = self.convert_to_feet_inches_fraction(panel_height_inches_total)
+
+            # Initialize panels as an empty list
+            panels = []
+            
+            # Check if we have custom widths that should override everything else
+            use_custom_panels = False
+            if hasattr(self, 'custom_panel_widths') and self.custom_panel_widths:
+                custom_panel_ids = sorted(self.custom_panel_widths.keys())
+                if len(custom_panel_ids) > 0 and max(custom_panel_ids) <= 10:
+                    total_width = sum(self.custom_panel_widths.values())
+                    if total_width > 0 and total_width <= wall_width_inches_total * 1.05:
+                        use_custom_panels = True
+            
+            if use_custom_panels:
+                # Use purely custom panels based on stored widths
+                print("Using custom panel widths")
+                panel_ids = sorted(self.custom_panel_widths.keys())
+                
+                total_width = sum(self.custom_panel_widths.values())
+                scale_factor = 1.0
+                if total_width > wall_width_inches_total:
+                    scale_factor = wall_width_inches_total / total_width
+                    print(f"Scaling panel widths by factor {scale_factor}")
+                
+                current_x_percent = 0
+                for panel_id in panel_ids:
+                    panel_width = self.custom_panel_widths[panel_id] * scale_factor
+                    panel_width_percent = (panel_width / wall_width_inches_total * 100)
+                    panel_dim, panel_frac = self.convert_to_feet_inches_fraction(panel_width)
+                    
+                    panel = Panel(
+                        id=panel_id,
+                        x=current_x_percent,
+                        width=panel_width_percent,
+                        actual_width=panel_dim, 
+                        actual_width_fraction=panel_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    )
+                    panels.append(panel)
+                    current_x_percent += panel_width_percent
+                    
+            # ADD START SEAM LOGIC HERE (if you implemented it)
+            elif hasattr(self, 'use_start_seam_var') and self.use_start_seam_var.get():
+                # Use start seam positioning
+                panels = self.calculate_start_seam_panels(
+                    wall_width_inches_total, panel_height_dim, panel_height_frac,
+                    floor_mounted, height_offset_dim, height_offset_fraction
+                )
+                    
+            # Center Equal Panels Logic
+            elif self.center_panels_var.get():
+                center_panel_count = max(1, self.safe_int_conversion(self.center_panel_count_var.get(), 4))
+                center_panel_width = 48
+                total_center_width = center_panel_count * center_panel_width
+
+                if total_center_width > wall_width_inches_total:
+                    messagebox.showerror("Error", "Center panels exceed wall width!")
+                    return
+
+                side_panel_width = (wall_width_inches_total - total_center_width) / 2
+
+                # Add left panel if applicable
+                if side_panel_width > 0:
+                    side_panel_dim, side_panel_frac = self.convert_to_feet_inches_fraction(side_panel_width)
+                    panels.append(Panel(
+                        id=1,
+                        x=0,
+                        width=(side_panel_width / wall_width_inches_total * 100),
+                        actual_width=side_panel_dim,
+                        actual_width_fraction=side_panel_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+
+                # Add center panels
+                for i in range(center_panel_count):
+                    center_panel_dim, center_panel_frac = self.convert_to_feet_inches_fraction(center_panel_width)
+                    panels.append(Panel(
+                        id=len(panels) + 1,
+                        x=(side_panel_width + i * center_panel_width) / wall_width_inches_total * 100,
+                        width=(center_panel_width / wall_width_inches_total * 100),
+                        actual_width=center_panel_dim,
+                        actual_width_fraction=center_panel_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+
+                # Add right panel if applicable
+                if side_panel_width > 0:
+                    side_panel_dim, side_panel_frac = self.convert_to_feet_inches_fraction(side_panel_width)
+                    panels.append(Panel(
+                        id=len(panels) + 1,
+                        x=((wall_width_inches_total - side_panel_width) / wall_width_inches_total * 100),
+                        width=(side_panel_width / wall_width_inches_total * 100),
+                        actual_width=side_panel_dim,
+                        actual_width_fraction=side_panel_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+                    
+            # Equal Panels Logic
+            elif self.use_equal_panels:
+                base_panel_width = wall_width_inches_total / self.panel_count
+                
+                current_x = 0
+                for i in range(self.panel_count):
+                    panel_dim, panel_frac = self.convert_to_feet_inches_fraction(base_panel_width)
+                    panels.append(Panel(
+                        id=i+1,
+                        x=(current_x / wall_width_inches_total * 100),
+                        width=(base_panel_width / wall_width_inches_total * 100),
+                        actual_width=panel_dim,
+                        actual_width_fraction=panel_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+                    current_x += base_panel_width
+                    
+            # Fixed Width Panels Logic
+            else:
+                panel_width_inches_total = self.convert_to_inches(
+                    panel_width_feet,
+                    panel_width_inches,
+                    panel_width_fraction
+                )
+                
+                if panel_width_inches_total <= 0:
+                    return
+
+                current_x = 0
+                panel_id = 1
+                while current_x < wall_width_inches_total:
+                    current_panel_width = min(panel_width_inches_total, wall_width_inches_total - current_x)
+                    panel_dim, panel_frac = self.convert_to_feet_inches_fraction(current_panel_width)
+                    
+                    panels.append(Panel(
+                        id=panel_id,
+                        x=(current_x / wall_width_inches_total * 100),
+                        width=(current_panel_width / wall_width_inches_total * 100),
+                        actual_width=panel_dim,
+                        actual_width_fraction=panel_frac,
+                        height=panel_height_dim,
+                        height_fraction=panel_height_frac,
+                        color=self.panel_color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    ))
+                    current_x += panel_width_inches_total
+                    panel_id += 1
+            
+            # Process split panels (your existing logic)
+            if hasattr(self, 'split_panels') and self.split_panels:
+                # Create a mapping of original panels by ID
+                panel_map = {p.id: p for p in panels}
+                
+                # Create the final panel list
+                final_panels = []
+                processed_ids = set()
+                
+                # Sort panels by their x position for consistent ordering
+                sorted_panels = sorted(panels, key=lambda p: p.x)
+                
+                for panel in sorted_panels:
+                    # Skip if we've already processed this panel
+                    if panel.id in processed_ids:
+                        continue
+                    
+                    # Check if this panel is the left side of a split
+                    is_left_panel = False
+                    split_info = None
+                    
+                    for orig_id, info in self.split_panels.items():
+                        if panel.id == info['left_id']:
+                            is_left_panel = True
+                            split_info = info
+                            break
+                    
+                    if not is_left_panel:
+                        # This is not a split panel's left side, add as-is
+                        final_panels.append(panel)
+                        processed_ids.add(panel.id)
+                        continue
+                    
+                    # This is a left panel in a split
+                    half_width_inches = split_info['half_width']
+                    half_dim, half_frac = self.convert_to_feet_inches_fraction(half_width_inches)
+                    half_width_percent = (half_width_inches / wall_width_inches_total) * 100
+                    
+                    # Add left panel
+                    left_panel = Panel(
+                        id=panel.id,
+                        x=panel.x,
+                        width=half_width_percent,
+                        actual_width=half_dim,
+                        actual_width_fraction=half_frac,
+                        height=panel.height,
+                        height_fraction=panel.height_fraction,
+                        color=panel.color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    )
+                    final_panels.append(left_panel)
+                    processed_ids.add(panel.id)
+                    
+                    # Calculate right panel position
+                    right_x_percent = panel.x + half_width_percent
+                    right_id = split_info['right_id']
+                    
+                    # Add right panel
+                    right_panel = Panel(
+                        id=right_id,
+                        x=right_x_percent,
+                        width=half_width_percent,
+                        actual_width=half_dim,
+                        actual_width_fraction=half_frac,
+                        height=panel.height,
+                        height_fraction=panel.height_fraction,
+                        color=panel.color,
+                        border_color=self.panel_border_color,
+                        floor_mounted=floor_mounted,
+                        height_offset=height_offset_dim if not floor_mounted else None,
+                        height_offset_fraction=height_offset_fraction if not floor_mounted else "0"
+                    )
+                    final_panels.append(right_panel)
+                    processed_ids.add(right_id)
+                
+                panels = final_panels
+
+            # Draw the wall with calculated panels
+            self.draw_wall_with_annotations(panels) if hasattr(self, 'draw_wall_with_annotations') else self.draw_wall(panels)
+            
+            # Update summary
+            self.update_summary(panels, current_wall)
+            
+            # Important: Update current wall's panels property
+            if current_wall and not hasattr(self, 'recalculating'):
+                import copy
+                current_wall.panels = copy.deepcopy(panels)
+                if hasattr(self, 'wall_dimensions'):
+                    current_wall.dimensions = copy.deepcopy(self.wall_dimensions)
+                print(f"Updated {current_wall.name} panels: {len(panels)}")
+            
+        finally:
+            # Always reset the flag
+            self.calculation_in_progress = False
+            
+            # If there was a pending calculation request, do it now
+            if self.pending_calculation:
+                self.pending_calculation = False
+                self.after_idle(self.calculate)  # Schedule for next idle time
+
+    def update_summary(self, panels, current_wall):
+        """Separated summary update logic"""
         summary = []
-        summary.append(f"Wall dimensions: {self.format_dimension(self.wall_dimensions['width'], self.wall_dimensions.get('width_fraction', '0'))} × "
+        
+        # Add the current wall name to the summary
+        if current_wall:
+            summary.append(f"Wall: {current_wall.name}")
+        
+        # Add wall dimensions to summary with the dash format
+        summary.append(f"Wall dimensions: {self.format_dimension(self.wall_dimensions['width'], self.wall_dimensions.get('width_fraction', '0'))} x "
                       f"{self.format_dimension(self.wall_dimensions['height'], self.wall_dimensions.get('height_fraction', '0'))}")
         
         if self.use_baseboard:
@@ -6065,8 +8406,30 @@ with precise measurements and customizable configurations.
             summary.append(f"  Height: {self.format_dimension(panel.height, panel.height_fraction)}")
             summary.append(f"  Position: {panel.x:.1f}% from left")
 
-        self.summary_text.delete("1.0", tk.END)
-        self.summary_text.insert("1.0", "\n".join(summary))
+        # Add information about wall objects if present
+        if hasattr(self, 'wall_objects') and self.wall_objects:
+            summary.append(f"\nWall Objects: {len(self.wall_objects)}")
+            for i, obj in enumerate(self.wall_objects, 1):
+                summary.append(f"\nObject {i}: {obj.name}")
+                summary.append(f"  Width: {self.format_dimension(obj.width, obj.width_fraction)}")
+                summary.append(f"  Height: {self.format_dimension(obj.height, obj.height_fraction)}")
+                summary.append(f"  Position: {obj.x_position:.1f}% from left, {obj.y_position:.1f}% from top")
+
+        # Add information about annotations if present
+        if hasattr(self, 'annotation_circles') and self.annotation_circles:
+            summary.append(f"\nAnnotations: {len(self.annotation_circles)}")
+
+        # Update the summary text widget
+        if hasattr(self, 'summary_text') and self.summary_text is not None:
+            self.summary_text.delete("1.0", tk.END)
+            self.summary_text.insert("1.0", "\n".join(summary))
+            
+            # Switch to the summary tab if requested
+            if hasattr(self, 'tab_view') and hasattr(self, 'tab_summary'):
+                if hasattr(self, 'summary_refresh_requested') and self.summary_refresh_requested:
+                    self.tab_view.set("Summary")
+                    self.summary_refresh_requested = False
+
 
 if __name__ == "__main__":
     app = WallcoveringCalculatorUI()
